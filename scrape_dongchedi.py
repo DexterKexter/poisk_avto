@@ -1,53 +1,40 @@
 """
 Dongchedi.com used car scraper via Oxylabs Realtime API.
 
-Usage:
-    set OXY_USER=your_user
-    set OXY_PASS=your_pass
-    python scrape_dongchedi.py [--cities bj,sh,gz,sz] [--limit 1000] [--workers 3]
+Parses individual cards (full data) by sku_id, writes to unified schema
+in Postgres (Supabase) or SQLite (local fallback).
 
-Stores results in cars.db (SQLite). Resume-friendly: dedupes by URL.
+Usage:
+    python scrape_dongchedi.py --skip-listing --limit 1000 --workers 5
+
+Env vars:
+    OXY_USER, OXY_PASS  — Oxylabs credentials (required)
+    SUPABASE_URL, SUPABASE_KEY — if set, writes to Postgres; otherwise to cars.db
 """
 
 import argparse
 import json
 import os
 import re
-import sqlite3
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
 from typing import Any
 
 import requests
 
-# ---------- Config ----------
+import db as DB
+
 OXY_USER = os.environ.get("OXY_USER", "")
 OXY_PASS = os.environ.get("OXY_PASS", "")
 OXY_URL = "https://realtime.oxylabs.io/v1/queries"
 
-CITY_CODES = {
-    "bj": ("北京", "Beijing"),
-    "sh": ("上海", "Shanghai"),
-    "gz": ("广州", "Guangzhou"),
-    "sz": ("深圳", "Shenzhen"),
-}
-
-LISTING_URL = "https://www.dongchedi.com/usedcar/x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x"
-LISTING_URL_PAGED = "https://www.dongchedi.com/usedcar/x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x?page={page}"
+SOURCE = "dongchedi"
 CARD_URL = "https://www.dongchedi.com/usedcar/{id}"
-
-DB_PATH = "cars.db"
-DELAY = 1.0
 MAX_RETRIES = 3
 
 
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-# ---------- Oxylabs request helper ----------
+# ---------- Oxylabs ----------
 def oxylabs_fetch(url: str, render: bool = True) -> str | None:
     if not OXY_USER or not OXY_PASS:
         sys.exit("ERROR: set OXY_USER and OXY_PASS environment variables")
@@ -64,10 +51,7 @@ def oxylabs_fetch(url: str, render: bool = True) -> str | None:
     for attempt in range(MAX_RETRIES):
         try:
             r = requests.post(
-                OXY_URL,
-                auth=(OXY_USER, OXY_PASS),
-                json=payload,
-                timeout=180,
+                OXY_URL, auth=(OXY_USER, OXY_PASS), json=payload, timeout=180,
             )
             if r.status_code != 200:
                 print(f"  HTTP {r.status_code} on {url} (attempt {attempt+1})")
@@ -76,18 +60,15 @@ def oxylabs_fetch(url: str, render: bool = True) -> str | None:
             data = r.json()
             results = data.get("results", [])
             if not results:
-                print(f"  empty results on {url}")
                 return None
             content = results[0].get("content")
             if not content or len(content) < 1000:
-                print(f"  short content on {url} ({len(content) if content else 0} bytes)")
                 time.sleep(2 ** attempt)
                 continue
             return content
         except Exception as e:
-            print(f"  exception on {url}: {e} (attempt {attempt+1})")
+            print(f"  exception on {url}: {e}")
             time.sleep(2 ** attempt)
-
     return None
 
 
@@ -96,9 +77,6 @@ NEXT_DATA_RE = re.compile(
     r'<script id="__NEXT_DATA__" type="application/json"[^>]*>(.*?)</script>',
     re.DOTALL,
 )
-
-# Real card IDs are 7+ digits. Shorter matches are nav links like /usedcar/5/.
-CARD_LINK_RE = re.compile(r'/usedcar/(\d{7,})')
 
 
 def extract_next_data(html: str) -> dict | None:
@@ -109,10 +87,6 @@ def extract_next_data(html: str) -> dict | None:
         return json.loads(m.group(1))
     except json.JSONDecodeError:
         return None
-
-
-def extract_card_ids(html: str) -> list[str]:
-    return list(dict.fromkeys(CARD_LINK_RE.findall(html)))
 
 
 # ---------- Translation maps ----------
@@ -185,12 +159,17 @@ DRIVE_MAP = {
     "全时四驱": "AWD", "适时四驱": "AWD", "分时四驱": "AWD", "四驱": "AWD",
 }
 
-BODY_MAP = {
-    "轿车": "Sedan", "SUV": "SUV", "MPV": "Minivan", "跑车": "Sports Car",
-    "皮卡": "Pickup", "微卡": "Mini Truck", "微面": "Microvan",
-    "轻客": "Light Commercial", "两厢车": "Hatchback", "三厢车": "Sedan",
-    "旅行车": "Wagon", "敞篷车": "Convertible", "硬顶敞篷车": "Convertible",
-    "客车": "Bus", "房车": "Motorhome",
+CITY_MAP = {
+    "北京": "Beijing", "上海": "Shanghai", "广州": "Guangzhou", "深圳": "Shenzhen",
+    "杭州": "Hangzhou", "成都": "Chengdu", "重庆": "Chongqing", "南京": "Nanjing",
+    "武汉": "Wuhan", "西安": "Xi'an", "天津": "Tianjin", "苏州": "Suzhou",
+    "青岛": "Qingdao", "沈阳": "Shenyang", "济南": "Jinan", "哈尔滨": "Harbin",
+    "长春": "Changchun", "合肥": "Hefei", "贵阳": "Guiyang", "烟台": "Yantai",
+    "宁波": "Ningbo", "郑州": "Zhengzhou", "南宁": "Nanning", "昆明": "Kunming",
+    "潍坊": "Weifang", "东莞": "Dongguan", "温州": "Wenzhou", "淄博": "Zibo",
+    "威海": "Weihai", "乌鲁木齐": "Urumqi", "南昌": "Nanchang", "厦门": "Xiamen",
+    "福州": "Fuzhou", "石家庄": "Shijiazhuang", "太原": "Taiyuan", "兰州": "Lanzhou",
+    "大连": "Dalian", "佛山": "Foshan", "无锡": "Wuxi", "长沙": "Changsha",
 }
 
 
@@ -206,7 +185,7 @@ def parse_wan(value: str) -> float | None:
     m = re.search(r'([\d.]+)\s*万', value)
     if m:
         try:
-            return float(m.group(1)) * 10000
+            return round(float(m.group(1)) * 10000, 1)
         except ValueError:
             return None
     m = re.search(r'([\d.]+)', value)
@@ -266,7 +245,6 @@ def parse_card(next_data: dict, card_id: str) -> dict | None:
         sku = next_data["props"]["pageProps"]["skuDetail"]
     except (KeyError, TypeError):
         return None
-
     if not sku:
         return None
 
@@ -284,7 +262,6 @@ def parse_card(next_data: dict, card_id: str) -> dict | None:
     brand_cn = car_info.get("brand_name", "")
     series_cn = car_info.get("series_name", "")
     car_name = car_info.get("car_name", "")
-    # Full model name: series + trim ("奔驰GLA" + "GLA 200 动感型")
     model_cn = (series_cn + " " + car_name).strip() if series_cn else car_name
 
     color_cn = car_info.get("body_color", "") or op.get("车身颜色", "")
@@ -292,38 +269,40 @@ def parse_card(next_data: dict, card_id: str) -> dict | None:
     gearbox_cn = op.get("变速箱", "") or power.get("gearbox_description", "")
     drive_cn = manip.get("driver_form", "")
 
-    # Body type
     series_type_code = car_info.get("series_type")
     body_type_codes = {0: "Sedan", 1: "SUV", 2: "Minivan", 3: "Pickup", 4: "Sports Car",
                        6: "Light Commercial", 7: "Microvan", 8: "Mini Truck"}
     body_type = body_type_codes.get(series_type_code) if series_type_code is not None else ""
     if not body_type and series_cn:
-        series_lower = series_cn.lower()
-        if "suv" in series_lower or "越野" in series_cn:
+        sl = series_cn.lower()
+        if "suv" in sl or "越野" in series_cn:
             body_type = "SUV"
-        elif "mpv" in series_lower:
+        elif "mpv" in sl:
             body_type = "Minivan"
 
-    # New-energy type
     energy_code = car_info.get("series_new_energy_type")
     energy_codes = {0: "Petrol", 1: "Electric", 2: "PHEV", 3: "PHEV", 4: "EREV"}
     engine_type = energy_codes.get(energy_code) or tr(fuel_cn, FUEL_MAP)
 
-    price_cny = sku.get("source_sh_price")
-    if price_cny:
-        price_cny = price_cny / 100  # fen -> CNY
-    new_price_cny = sku.get("source_offical_price")
-    if new_price_cny:
-        new_price_cny = new_price_cny / 100
+    # Price: dongchedi gives fen (1/100 CNY)
+    sh_price = sku.get("source_sh_price")
+    price_cny = sh_price / 100 if sh_price else None
+    off_price = sku.get("source_offical_price")
+    new_price_cny = off_price / 100 if off_price else None
 
-    # Mileage with multiple fallbacks
     km_age = (parse_wan(car_info.get("mileage", ""))
               or parse_wan(op.get("行驶里程", ""))
               or parse_wan(sku.get("important_text", "")))
 
-    ts = now_iso()
-    record = {
-        "inner_id": card_id,
+    city_cn = shop.get("city_name", "") or op.get("车源地", "")
+    reg_city_cn = op.get("上牌地", "")
+
+    images = sku.get("head_images") or []
+
+    ts = DB.now_iso()
+    return {
+        "source": SOURCE,
+        "source_id": str(card_id),
         "url": CARD_URL.format(id=card_id),
         "title": sku.get("title", "") or f"{series_cn} {car_name}".strip(),
         "mark_cn": brand_cn,
@@ -332,9 +311,20 @@ def parse_card(next_data: dict, card_id: str) -> dict | None:
         "model": model_cn,
         "complectation": car_name,
         "year": car_info.get("year"),
+
+        # Prices: original = CNY for dongchedi
+        "price_original": price_cny,
+        "price_currency": "CNY",
         "price_cny": price_cny,
+        "new_price_original": new_price_cny,
+        "new_price_currency": "CNY",
         "new_price_cny": new_price_cny,
+
+        # Mileage
+        "km_age_original": km_age,
+        "km_age_unit": "km",
         "km_age": km_age,
+
         "color_cn": color_cn,
         "color": tr(color_cn, COLOR_MAP),
         "body_type": body_type,
@@ -352,138 +342,34 @@ def parse_card(next_data: dict, card_id: str) -> dict | None:
         "width_mm": safe_int(space.get("width")),
         "height_mm": safe_int(space.get("height")),
         "wheelbase_mm": safe_int(space.get("wheelbase")),
-        "city_cn": shop.get("city_name", "") or op.get("车源地", ""),
-        "reg_city_cn": op.get("上牌地", ""),
+
+        "city_cn": city_cn,
+        "city": tr(city_cn, CITY_MAP),
+        "reg_city_cn": reg_city_cn,
+        "reg_city": tr(reg_city_cn, CITY_MAP),
         "reg_date": parse_reg_date(op.get("上牌时间", "")),
+
         "owners_count": parse_owners(op.get("过户次数", "")),
         "maintenance": op.get("保养方式", ""),
         "interior_color_cn": op.get("内饰颜色", ""),
         "description": sku.get("sh_car_desc", ""),
-        "images": json.dumps(sku.get("head_images") or [], ensure_ascii=False),
-        "image_count": len(sku.get("head_images") or []),
+        "images": images,
+        "image_count": len(images),
         "seller_type": "Dealer" if shop.get("shop_type") else "Private",
         "shop_name": shop.get("shop_name", ""),
         "shop_short_name": shop.get("shop_short_name", ""),
         "shop_address": shop.get("shop_address", ""),
-        "shop_id": shop.get("shop_id", ""),
+        "shop_id": str(shop.get("shop_id", "")),
         "shop_cars_count": shop.get("sales_car_num"),
         "sales_range": shop.get("sales_range", ""),
-        "spu_id": sku.get("spu_id", ""),
+
+        # Reserve for inspection report, options, etc.
+        "source_data": None,
+        "spu_id": str(sku.get("spu_id", "")),
+
         "first_seen": ts,
         "last_seen": ts,
     }
-    return record
-
-
-# ---------- Database ----------
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS cars (
-    inner_id TEXT PRIMARY KEY,
-    url TEXT,
-    title TEXT,
-    mark_cn TEXT, mark TEXT,
-    series_cn TEXT, model TEXT, complectation TEXT,
-    year INTEGER,
-    price_cny REAL, new_price_cny REAL,
-    km_age REAL,
-    color_cn TEXT, color TEXT,
-    body_type TEXT,
-    engine_type TEXT, fuel_cn TEXT,
-    transmission_cn TEXT, transmission_type TEXT,
-    drive_cn TEXT, drive_type TEXT,
-    displacement REAL, horse_power INTEGER,
-    acceleration_time TEXT,
-    length_mm INTEGER, width_mm INTEGER, height_mm INTEGER, wheelbase_mm INTEGER,
-    city_cn TEXT, reg_city_cn TEXT,
-    reg_date TEXT,
-    owners_count INTEGER,
-    maintenance TEXT, interior_color_cn TEXT,
-    description TEXT,
-    images TEXT, image_count INTEGER,
-    seller_type TEXT,
-    shop_name TEXT, shop_short_name TEXT, shop_address TEXT,
-    shop_id TEXT, shop_cars_count INTEGER, sales_range TEXT,
-    spu_id TEXT,
-    first_seen TEXT, last_seen TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_mark ON cars(mark);
-CREATE INDEX IF NOT EXISTS idx_year ON cars(year);
-CREATE INDEX IF NOT EXISTS idx_price ON cars(price_cny);
-CREATE INDEX IF NOT EXISTS idx_city ON cars(city_cn);
-
-CREATE TABLE IF NOT EXISTS seen_ids (
-    inner_id TEXT PRIMARY KEY,
-    first_seen TEXT
-);
-"""
-
-
-def db_init() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.executescript(SCHEMA)
-    conn.commit()
-    return conn
-
-
-def db_save(conn: sqlite3.Connection, rec: dict) -> None:
-    cols = list(rec.keys())
-    placeholders = ",".join(":" + c for c in cols)
-    col_list = ",".join(cols)
-    update_list = ",".join(f"{c}=excluded.{c}" for c in cols if c != "inner_id" and c != "first_seen")
-    sql = (f"INSERT INTO cars ({col_list}) VALUES ({placeholders}) "
-           f"ON CONFLICT(inner_id) DO UPDATE SET {update_list}")
-    conn.execute(sql, rec)
-    conn.execute(
-        "INSERT OR IGNORE INTO seen_ids (inner_id, first_seen) VALUES (?, ?)",
-        (rec["inner_id"], rec["first_seen"]),
-    )
-    conn.commit()
-
-
-def db_known_ids(conn: sqlite3.Connection) -> set[str]:
-    rows = conn.execute("SELECT inner_id FROM seen_ids").fetchall()
-    return {r[0] for r in rows}
-
-
-# ---------- Workflow ----------
-def collect_listing_ids(cities: list[str], limit: int) -> list[str]:
-    all_ids: list[str] = []
-    seen: set[str] = set()
-
-    for city in cities:
-        if len(all_ids) >= limit:
-            break
-        page = 1
-        per_city_collected = 0
-        while len(all_ids) < limit and page <= 100:
-            url = (LISTING_URL if page == 1
-                   else LISTING_URL_PAGED.format(page=page))
-            print(f"[listing] {city} page {page} -> {url}")
-            html = oxylabs_fetch(url, render=True)
-            if not html:
-                print(f"  failed to fetch listing")
-                break
-
-            ids = extract_card_ids(html)
-            new_ids = [i for i in ids if i not in seen]
-            if not new_ids:
-                print(f"  no new ids on page {page}, moving on")
-                break
-
-            for i in new_ids:
-                seen.add(i)
-                all_ids.append(i)
-                per_city_collected += 1
-                if len(all_ids) >= limit:
-                    break
-
-            print(f"  collected {len(new_ids)} new ids "
-                  f"(city {city} total: {per_city_collected}, grand total: {len(all_ids)})")
-            page += 1
-            time.sleep(DELAY)
-
-    return all_ids
 
 
 def scrape_card(card_id: str) -> dict | None:
@@ -493,76 +379,60 @@ def scrape_card(card_id: str) -> dict | None:
         return None
     nd = extract_next_data(html)
     if not nd:
-        print(f"  no __NEXT_DATA__ for id={card_id}")
         return None
     return parse_card(nd, card_id)
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cities", default="bj,sh,gz,sz",
-                    help="Comma-separated city codes (bj, sh, gz, sz)")
-    ap.add_argument("--limit", type=int, default=1000,
-                    help="Max number of cards to scrape this run")
-    ap.add_argument("--workers", type=int, default=3,
-                    help="Parallel card-page workers")
+    ap.add_argument("--limit", type=int, default=1000)
+    ap.add_argument("--workers", type=int, default=5)
     ap.add_argument("--skip-listing", action="store_true",
-                    help="Skip listing collection, only re-parse known ids")
+                    help="Use IDs from pending_ids (populated by collect_ids.py)")
     args = ap.parse_args()
 
-    cities = [c.strip() for c in args.cities.split(",") if c.strip() in CITY_CODES]
-    print(f"Cities: {cities}, limit: {args.limit}, workers: {args.workers}")
+    print(f"Backend: {DB.backend_name()}")
+    print(f"Limit: {args.limit}, workers: {args.workers}")
 
-    conn = db_init()
-    known = db_known_ids(conn)
-    print(f"Already in DB: {len(known)} cards")
+    existing = DB.count_cars(SOURCE)
+    print(f"cars[{SOURCE}] already: {existing}")
 
-    if args.skip_listing:
-        # Pull IDs from pending_ids table (populated by collect_ids.py),
-        # excluding those already fully scraped.
-        try:
-            rows = conn.execute("""
-                SELECT sku_id FROM pending_ids
-                WHERE sku_id NOT IN (SELECT inner_id FROM seen_ids)
-                ORDER BY found_at DESC
-                LIMIT ?
-            """, (args.limit,)).fetchall()
-            ids_to_scrape = [r[0] for r in rows]
-            print(f"Loaded {len(ids_to_scrape)} pending IDs from pending_ids table")
-        except sqlite3.OperationalError:
-            print("ERROR: pending_ids table not found. Run collect_ids.py first.")
-            ids_to_scrape = []
-    else:
-        all_ids = collect_listing_ids(cities, args.limit)
-        ids_to_scrape = all_ids
-        print(f"\nCollected {len(all_ids)} listing ids "
-              f"({len([i for i in all_ids if i not in known])} new)")
+    if not args.skip_listing:
+        sys.exit("Use --skip-listing — listing collection is in collect_ids.py")
 
-    print(f"\nScraping {len(ids_to_scrape)} cards with {args.workers} workers...")
+    ids = DB.get_pending_ids(SOURCE, args.limit)
+    print(f"Loaded {len(ids)} pending IDs for [{SOURCE}]")
+    if not ids:
+        print("Nothing to scrape. Run collect_ids.py first.")
+        return
+
+    print(f"\nScraping {len(ids)} cards with {args.workers} workers...")
     ok, fail = 0, 0
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(scrape_card, cid): cid for cid in ids_to_scrape}
+        futures = {pool.submit(scrape_card, cid): cid for cid in ids}
         for i, fut in enumerate(as_completed(futures), 1):
             cid = futures[fut]
             try:
                 rec = fut.result()
             except Exception as e:
                 rec = None
-                print(f"  [{i}/{len(ids_to_scrape)}] id={cid} exception: {e}")
+                print(f"  [{i}/{len(ids)}] id={cid} EXCEPTION: {e}")
 
             if rec:
-                db_save(conn, rec)
-                ok += 1
-                print(f"  [{i}/{len(ids_to_scrape)}] id={cid} OK "
-                      f"{rec['mark']} {rec['model']} {rec['year']} "
-                      f"{rec['price_cny']} CNY {rec['km_age']}km {rec['city_cn']}")
+                if DB.upsert_car(rec):
+                    ok += 1
+                    print(f"  [{i}/{len(ids)}] id={cid} OK {rec['mark']} {rec['model']} "
+                          f"{rec['year']} {rec['price_cny']} CNY {rec['km_age']}km "
+                          f"{rec['city'] or rec['city_cn']}")
+                else:
+                    fail += 1
+                    print(f"  [{i}/{len(ids)}] id={cid} DB FAIL")
             else:
                 fail += 1
-                print(f"  [{i}/{len(ids_to_scrape)}] id={cid} FAIL")
+                print(f"  [{i}/{len(ids)}] id={cid} SCRAPE FAIL")
 
     print(f"\nDone. OK: {ok}, FAIL: {fail}")
-    print(f"Database: {DB_PATH}")
-    conn.close()
+    print(f"Total in cars[{SOURCE}]: {DB.count_cars(SOURCE)}")
 
 
 if __name__ == "__main__":
