@@ -1,0 +1,44 @@
+name: Test scrape Dongchedi
+
+on:
+  workflow_dispatch:  # ручной запуск через UI GitHub
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Collect IDs (1 scroll batch)
+        env:
+          OXY_USER: ${{ secrets.OXY_USER }}
+          OXY_PASS: ${{ secrets.OXY_PASS }}
+        run: python collect_ids.py --limit 100 --scrolls 10
+
+      - name: Scrape 20 cards
+        env:
+          OXY_USER: ${{ secrets.OXY_USER }}
+          OXY_PASS: ${{ secrets.OXY_PASS }}
+        run: python scrape_dongchedi.py --skip-listing --limit 20 --workers 3
+
+      - name: Show database contents
+        run: |
+          python -c "import sqlite3; c=sqlite3.connect('cars.db'); print('Total cars:', c.execute('SELECT COUNT(*) FROM cars').fetchone()[0]); rows=c.execute('SELECT mark, model, year, price_cny, km_age, city_cn FROM cars LIMIT 10').fetchall(); [print(r) for r in rows]"
+
+      - name: Upload cars.db as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cars-database
+          path: cars.db
+          retention-days: 7
