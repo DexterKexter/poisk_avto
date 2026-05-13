@@ -1,4 +1,4 @@
-name: Test scrape Dongchedi
+name: Scrape Dongchedi
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout code
@@ -20,18 +20,23 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Collect IDs
+      - name: Collect IDs (10 iterations)
         env:
           OXY_USER: ${{ secrets.OXY_USER }}
           OXY_PASS: ${{ secrets.OXY_PASS }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python collect_ids.py --limit 100 --scrolls 10
+        run: |
+          for i in {1..10}; do
+            echo "=== Iteration $i / 10 ==="
+            python collect_ids.py --limit 5000 --scrolls 10 || echo "  (iteration $i failed, continuing)"
+            sleep 3
+          done
 
-      - name: Scrape 20 cards
+      - name: Scrape up to 500 cards
         env:
           OXY_USER: ${{ secrets.OXY_USER }}
           OXY_PASS: ${{ secrets.OXY_PASS }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python scrape_dongchedi.py --skip-listing --limit 20 --workers 3
+        run: python scrape_dongchedi.py --skip-listing --limit 500 --workers 10
