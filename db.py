@@ -5,10 +5,15 @@ Uses Supabase Postgres via REST API (PostgREST) — no psycopg2 needed.
 Falls back to SQLite for local development if SUPABASE_URL not set.
 
 Env vars:
-    SUPABASE_URL — e.g. https://xxxx.supabase.co
-    SUPABASE_KEY — service_role key (long JWT starting with eyJ...)
+    SUPABASE_URL  — e.g. https://xxxx.supabase.co
+    SUPABASE_KEY  — service_role key (long JWT starting with eyJ...)
 
 If both unset, uses local cars.db (SQLite).
+
+Schema is multi-source compatible:
+  *_original     : value in source language (e.g. zh, ko, ja)
+  source_language: 'zh' / 'ko' / 'ja' / 'en'
+  price stored as price_original + price_currency only; no USD/CNY normalization here
 """
 
 import json
@@ -18,7 +23,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 import requests
-
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
@@ -32,6 +36,7 @@ def now_iso() -> str:
 
 
 # ---------- Postgres (Supabase via REST) ----------
+
 def _pg_headers() -> dict:
     return {
         "apikey": SUPABASE_KEY,
@@ -78,7 +83,6 @@ def pg_upsert_pending(rec: dict) -> bool:
 
 def pg_get_pending_ids(source: str, limit: int) -> list[str]:
     """Get pending source_ids not yet present in cars."""
-    # 1) get all pending IDs for this source
     r = _pg_request(
         "GET",
         f"pending_ids?source=eq.{source}&select=source_id&limit={limit * 3}",
@@ -88,7 +92,6 @@ def pg_get_pending_ids(source: str, limit: int) -> list[str]:
         return []
     pending = [row["source_id"] for row in r.json()]
 
-    # 2) get all already scraped IDs for this source
     r = _pg_request("GET", f"cars?source=eq.{source}&select=source_id")
     if r.status_code != 200:
         return pending[:limit]
@@ -115,41 +118,54 @@ def pg_count(table: str, where: str = "") -> int:
     return 0
 
 
-# ---------- SQLite fallback ----------
+# ---------- SQLite fallback (mirrors Postgres schema) ----------
+
 SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS cars (
     source TEXT NOT NULL,
     source_id TEXT NOT NULL,
+    source_language TEXT,
     url TEXT, title TEXT,
-    mark_cn TEXT, mark TEXT,
-    series_cn TEXT, model TEXT, complectation TEXT,
+
+    mark_original TEXT, mark TEXT,
+    series_original TEXT, model TEXT, complectation TEXT,
     year INTEGER,
-    price_original REAL, price_currency TEXT, price_cny REAL,
-    new_price_original REAL, new_price_currency TEXT, new_price_cny REAL,
+
+    price_original REAL, price_currency TEXT,
+    new_price_original REAL, new_price_currency TEXT,
+
     km_age_original REAL, km_age_unit TEXT, km_age REAL,
-    color_cn TEXT, color TEXT,
+
+    color_original TEXT, color TEXT,
     body_type TEXT,
-    engine_type TEXT, fuel_cn TEXT,
-    transmission_cn TEXT, transmission_type TEXT,
-    drive_cn TEXT, drive_type TEXT,
+    engine_type TEXT, fuel_original TEXT,
+    transmission_original TEXT, transmission_type TEXT,
+    drive_original TEXT, drive_type TEXT,
     displacement REAL, horse_power INTEGER,
     acceleration_time TEXT,
     length_mm INTEGER, width_mm INTEGER, height_mm INTEGER, wheelbase_mm INTEGER,
-    city_cn TEXT, city TEXT, reg_city_cn TEXT, reg_city TEXT,
+
+    city_original TEXT, city TEXT,
+    reg_city_original TEXT, reg_city TEXT,
     reg_date TEXT,
-    owners_count INTEGER, maintenance TEXT, interior_color_cn TEXT,
+
+    owners_count INTEGER, maintenance TEXT, interior_color_original TEXT,
     description TEXT,
     images TEXT, image_count INTEGER,
+
     seller_type TEXT, shop_name TEXT, shop_short_name TEXT,
     shop_address TEXT, shop_id TEXT, shop_cars_count INTEGER, sales_range TEXT,
+
     source_data TEXT, spu_id TEXT,
     first_seen TEXT, last_seen TEXT,
+
     PRIMARY KEY (source, source_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_cars_mark ON cars(mark);
 CREATE INDEX IF NOT EXISTS idx_cars_year ON cars(year);
-CREATE INDEX IF NOT EXISTS idx_cars_price ON cars(price_cny);
+CREATE INDEX IF NOT EXISTS idx_cars_price ON cars(price_currency, price_original);
+CREATE INDEX IF NOT EXISTS idx_cars_source_language ON cars(source_language);
 
 CREATE TABLE IF NOT EXISTS pending_ids (
     source TEXT NOT NULL,
@@ -236,6 +252,7 @@ def sqlite_count(table: str, where_sql: str = "", params: tuple = ()) -> int:
 
 
 # ---------- Unified API ----------
+
 def upsert_car(rec: dict) -> bool:
     if USE_POSTGRES:
         return pg_upsert_car(rec)
