@@ -4,11 +4,18 @@ Dongchedi.com used car scraper via Oxylabs Realtime API.
 Parses individual cards (full data) by sku_id, writes to unified schema
 in Postgres (Supabase) or SQLite (local fallback).
 
+Schema notes (multi-source compatible):
+  - *_original  : value in source language (used to be *_cn)
+  - price_original + price_currency : NO conversion, frontend does it via live FX
+  - km_age_original + km_age_unit + km_age (normalized km for cross-market filters)
+  - source_language : 'zh' / 'ko' / 'ja' / ...
+  - source_data JSONB : source-specific fields (inspection report etc.)
+
 Usage:
     python scrape_dongchedi.py --skip-listing --limit 1000 --workers 5
 
 Env vars:
-    OXY_USER, OXY_PASS  — Oxylabs credentials (required)
+    OXY_USER, OXY_PASS — Oxylabs credentials (required)
     SUPABASE_URL, SUPABASE_KEY — if set, writes to Postgres; otherwise to cars.db
 """
 
@@ -30,15 +37,19 @@ OXY_PASS = os.environ.get("OXY_PASS", "")
 OXY_URL = "https://realtime.oxylabs.io/v1/queries"
 
 SOURCE = "dongchedi"
+SOURCE_LANGUAGE = "zh"
+PRICE_CURRENCY = "CNY"
+KM_AGE_UNIT = "km"
+
 CARD_URL = "https://www.dongchedi.com/usedcar/{id}"
 MAX_RETRIES = 3
 
 
 # ---------- Oxylabs ----------
+
 def oxylabs_fetch(url: str, render: bool = True) -> str | None:
     if not OXY_USER or not OXY_PASS:
         sys.exit("ERROR: set OXY_USER and OXY_PASS environment variables")
-
     payload = {
         "source": "universal",
         "url": url,
@@ -73,6 +84,7 @@ def oxylabs_fetch(url: str, render: bool = True) -> str | None:
 
 
 # ---------- HTML parsing ----------
+
 NEXT_DATA_RE = re.compile(
     r'<script id="__NEXT_DATA__" type="application/json"[^>]*>(.*?)</script>',
     re.DOTALL,
@@ -89,7 +101,8 @@ def extract_next_data(html: str) -> dict | None:
         return None
 
 
-# ---------- Translation maps ----------
+# ---------- Translation maps (shared across future parsers) ----------
+
 BRAND_MAP = {
     "奔驰": "Mercedes-Benz", "宝马": "BMW", "奥迪": "Audi", "大众": "Volkswagen",
     "丰田": "Toyota", "本田": "Honda", "日产": "Nissan", "马自达": "Mazda",
@@ -240,6 +253,7 @@ def safe_int(value: Any) -> int | None:
 
 
 # ---------- Card parsing ----------
+
 def parse_card(next_data: dict, card_id: str) -> dict | None:
     try:
         sku = next_data["props"]["pageProps"]["skuDetail"]
@@ -259,102 +273,117 @@ def parse_card(next_data: dict, card_id: str) -> dict | None:
     for item in (sku.get("other_params") or []):
         op[item.get("name", "")] = item.get("value", "")
 
-    brand_cn = car_info.get("brand_name", "")
-    series_cn = car_info.get("series_name", "")
+    brand_original = car_info.get("brand_name", "")
+    series_original = car_info.get("series_name", "")
     car_name = car_info.get("car_name", "")
-    model_cn = (series_cn + " " + car_name).strip() if series_cn else car_name
+    model = (series_original + " " + car_name).strip() if series_original else car_name
 
-    color_cn = car_info.get("body_color", "") or op.get("车身颜色", "")
-    fuel_cn = power.get("fuel_form", "")
-    gearbox_cn = op.get("变速箱", "") or power.get("gearbox_description", "")
-    drive_cn = manip.get("driver_form", "")
+    color_original = car_info.get("body_color", "") or op.get("车身颜色", "")
+    fuel_original = power.get("fuel_form", "")
+    gearbox_original = op.get("变速箱", "") or power.get("gearbox_description", "")
+    drive_original = manip.get("driver_form", "")
 
     series_type_code = car_info.get("series_type")
     body_type_codes = {0: "Sedan", 1: "SUV", 2: "Minivan", 3: "Pickup", 4: "Sports Car",
                        6: "Light Commercial", 7: "Microvan", 8: "Mini Truck"}
     body_type = body_type_codes.get(series_type_code) if series_type_code is not None else ""
-    if not body_type and series_cn:
-        sl = series_cn.lower()
-        if "suv" in sl or "越野" in series_cn:
+    if not body_type and series_original:
+        sl = series_original.lower()
+        if "suv" in sl or "越野" in series_original:
             body_type = "SUV"
         elif "mpv" in sl:
             body_type = "Minivan"
 
     energy_code = car_info.get("series_new_energy_type")
     energy_codes = {0: "Petrol", 1: "Electric", 2: "PHEV", 3: "PHEV", 4: "EREV"}
-    engine_type = energy_codes.get(energy_code) or tr(fuel_cn, FUEL_MAP)
+    engine_type = energy_codes.get(energy_code) or tr(fuel_original, FUEL_MAP)
 
-    # Price: dongchedi gives fen (1/100 CNY)
+    # Price: dongchedi gives fen (1/100 CNY). Store original CNY only; frontend converts.
     sh_price = sku.get("source_sh_price")
-    price_cny = sh_price / 100 if sh_price else None
+    price_original = sh_price / 100 if sh_price else None
+
     off_price = sku.get("source_offical_price")
-    new_price_cny = off_price / 100 if off_price else None
+    new_price_original = off_price / 100 if off_price else None
 
     km_age = (parse_wan(car_info.get("mileage", ""))
               or parse_wan(op.get("行驶里程", ""))
               or parse_wan(sku.get("important_text", "")))
 
-    city_cn = shop.get("city_name", "") or op.get("车源地", "")
-    reg_city_cn = op.get("上牌地", "")
+    city_original = shop.get("city_name", "") or op.get("车源地", "")
+    reg_city_original = op.get("上牌地", "")
 
     images = sku.get("head_images") or []
 
     ts = DB.now_iso()
+
     return {
         "source": SOURCE,
         "source_id": str(card_id),
+        "source_language": SOURCE_LANGUAGE,
         "url": CARD_URL.format(id=card_id),
-        "title": sku.get("title", "") or f"{series_cn} {car_name}".strip(),
-        "mark_cn": brand_cn,
-        "mark": tr(brand_cn, BRAND_MAP) or brand_cn,
-        "series_cn": series_cn,
-        "model": model_cn,
+        "title": sku.get("title", "") or f"{series_original} {car_name}".strip(),
+
+        # Brand / model
+        "mark_original": brand_original,
+        "mark": tr(brand_original, BRAND_MAP) or brand_original,
+        "series_original": series_original,
+        "model": model,
         "complectation": car_name,
         "year": car_info.get("year"),
 
-        # Prices: original = CNY for dongchedi
-        "price_original": price_cny,
-        "price_currency": "CNY",
-        "price_cny": price_cny,
-        "new_price_original": new_price_cny,
-        "new_price_currency": "CNY",
-        "new_price_cny": new_price_cny,
+        # Prices: original currency only — frontend converts via live FX
+        "price_original": price_original,
+        "price_currency": PRICE_CURRENCY,
+        "new_price_original": new_price_original,
+        "new_price_currency": PRICE_CURRENCY if new_price_original else None,
 
-        # Mileage
+        # Mileage (km_age stays normalized for cross-market filters)
         "km_age_original": km_age,
-        "km_age_unit": "km",
+        "km_age_unit": KM_AGE_UNIT,
         "km_age": km_age,
 
-        "color_cn": color_cn,
-        "color": tr(color_cn, COLOR_MAP),
+        # Color
+        "color_original": color_original,
+        "color": tr(color_original, COLOR_MAP),
+
+        # Body / engine / transmission / drive
         "body_type": body_type,
         "engine_type": engine_type,
-        "fuel_cn": fuel_cn,
-        "transmission_cn": gearbox_cn,
-        "transmission_type": tr(gearbox_cn, TRANSMISSION_MAP)
-                             or ("Automatic" if "自动" in gearbox_cn else ""),
-        "drive_cn": drive_cn,
-        "drive_type": tr(drive_cn, DRIVE_MAP),
+        "fuel_original": fuel_original,
+        "transmission_original": gearbox_original,
+        "transmission_type": tr(gearbox_original, TRANSMISSION_MAP)
+                              or ("Automatic" if "自动" in gearbox_original else ""),
+        "drive_original": drive_original,
+        "drive_type": tr(drive_original, DRIVE_MAP),
+
         "displacement": parse_displacement(op.get("排量", "") or power.get("capacity", "")),
         "horse_power": parse_horse_power(power.get("horsepower", "")),
         "acceleration_time": power.get("acceleration_time", ""),
+
+        # Dimensions
         "length_mm": safe_int(space.get("length")),
         "width_mm": safe_int(space.get("width")),
         "height_mm": safe_int(space.get("height")),
         "wheelbase_mm": safe_int(space.get("wheelbase")),
 
-        "city_cn": city_cn,
-        "city": tr(city_cn, CITY_MAP),
-        "reg_city_cn": reg_city_cn,
-        "reg_city": tr(reg_city_cn, CITY_MAP),
+        # Location
+        "city_original": city_original,
+        "city": tr(city_original, CITY_MAP),
+        "reg_city_original": reg_city_original,
+        "reg_city": tr(reg_city_original, CITY_MAP),
         "reg_date": parse_reg_date(op.get("上牌时间", "")),
 
+        # Misc
         "owners_count": parse_owners(op.get("过户次数", "")),
         "maintenance": op.get("保养方式", ""),
-        "interior_color_cn": op.get("内饰颜色", ""),
+        "interior_color_original": op.get("内饰颜色", ""),
         "description": sku.get("sh_car_desc", ""),
+
+        # Images
         "images": images,
         "image_count": len(images),
+
+        # Shop
         "seller_type": "Dealer" if shop.get("shop_type") else "Private",
         "shop_name": shop.get("shop_name", ""),
         "shop_short_name": shop.get("shop_short_name", ""),
@@ -393,7 +422,6 @@ def main() -> None:
 
     print(f"Backend: {DB.backend_name()}")
     print(f"Limit: {args.limit}, workers: {args.workers}")
-
     existing = DB.count_cars(SOURCE)
     print(f"cars[{SOURCE}] already: {existing}")
 
@@ -402,12 +430,14 @@ def main() -> None:
 
     ids = DB.get_pending_ids(SOURCE, args.limit)
     print(f"Loaded {len(ids)} pending IDs for [{SOURCE}]")
+
     if not ids:
         print("Nothing to scrape. Run collect_ids.py first.")
         return
 
     print(f"\nScraping {len(ids)} cards with {args.workers} workers...")
     ok, fail = 0, 0
+
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(scrape_card, cid): cid for cid in ids}
         for i, fut in enumerate(as_completed(futures), 1):
@@ -422,8 +452,8 @@ def main() -> None:
                 if DB.upsert_car(rec):
                     ok += 1
                     print(f"  [{i}/{len(ids)}] id={cid} OK {rec['mark']} {rec['model']} "
-                          f"{rec['year']} {rec['price_cny']} CNY {rec['km_age']}km "
-                          f"{rec['city'] or rec['city_cn']}")
+                          f"{rec['year']} {rec['price_original']} {rec['price_currency']} "
+                          f"{rec['km_age']}km {rec['city'] or rec['city_original']}")
                 else:
                     fail += 1
                     print(f"  [{i}/{len(ids)}] id={cid} DB FAIL")
