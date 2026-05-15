@@ -415,7 +415,7 @@ def scrape_card(card_id: str) -> dict | None:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=1000)
-    ap.add_argument("--workers", type=int, default=5)
+    ap.add_argument("--workers", type=int, default=10)
     ap.add_argument("--skip-listing", action="store_true",
                     help="Use IDs from pending_ids (populated by collect_ids.py)")
     args = ap.parse_args()
