@@ -49,7 +49,7 @@ jobs:
           OXY_USER: ${{ secrets.OXY_USER }}
           OXY_PASS: ${{ secrets.OXY_PASS }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           python collect_ids.py \
             --cities   "${{ inputs.cities   || 'beijing,shanghai,guangzhou,shenzhen' }}" \
@@ -62,7 +62,7 @@ jobs:
           OXY_USER: ${{ secrets.OXY_USER }}
           OXY_PASS: ${{ secrets.OXY_PASS }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           python scrape_dongchedi.py --skip-listing \
             --limit   ${{ inputs.scrape_limit || 500 }} \
