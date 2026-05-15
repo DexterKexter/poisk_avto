@@ -7,10 +7,22 @@ on:
         description: 'Cities (comma-separated)'
         required: false
         default: 'beijing,shanghai,guangzhou,shenzhen'
-      scrolls:
-        description: 'Scrolls per city (XHR pages ≈ scrolls × 20 cars)'
+      brands:
+        description: "Brand IDs (comma-separated) or 'all' (default: all 79)"
         required: false
-        default: '10'
+        default: 'all'
+      scrolls:
+        description: 'Scrolls per (city,brand) request'
+        required: false
+        default: '8'
+      batch_size:
+        description: 'Parallel requests per batch'
+        required: false
+        default: '4'
+      batch_pause:
+        description: 'Seconds between batches'
+        required: false
+        default: '3'
       min_year:
         description: 'Skip cars older than this year (0 = no filter)'
         required: false
@@ -18,17 +30,15 @@ on:
       collect_limit:
         description: 'Max new IDs to upsert in collect step'
         required: false
-        default: '5000'
+        default: '10000'
       scrape_limit:
         description: 'Max cards to scrape this run'
         required: false
-        default: '500'
+        default: '2000'
       workers:
         description: 'Parallel card workers'
         required: false
         default: '10'
-  # schedule:
-  #   - cron: '0 19 * * *'    # 03:00 Beijing — uncomment for daily refresh
 
 jobs:
   scrape:
@@ -44,7 +54,7 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Collect IDs (XHR capture, multi-city, year filter)
+      - name: Collect IDs (brand × city XHR)
         env:
           OXY_USER: ${{ secrets.OXY_USER }}
           OXY_PASS: ${{ secrets.OXY_PASS }}
@@ -52,10 +62,13 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           python collect_ids.py \
-            --cities   "${{ inputs.cities   || 'beijing,shanghai,guangzhou,shenzhen' }}" \
-            --scrolls  ${{ inputs.scrolls   || 10 }} \
-            --min-year ${{ inputs.min_year  || 2022 }} \
-            --limit    ${{ inputs.collect_limit || 5000 }}
+            --cities      "${{ inputs.cities      || 'beijing,shanghai,guangzhou,shenzhen' }}" \
+            --brands      "${{ inputs.brands      || 'all' }}" \
+            --scrolls     ${{ inputs.scrolls      || 8 }} \
+            --batch-size  ${{ inputs.batch_size   || 4 }} \
+            --batch-pause ${{ inputs.batch_pause  || 3 }} \
+            --min-year    ${{ inputs.min_year     || 2022 }} \
+            --limit       ${{ inputs.collect_limit || 10000 }}
 
       - name: Scrape pending cards
         env:
@@ -65,5 +78,5 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           python scrape_dongchedi.py --skip-listing \
-            --limit   ${{ inputs.scrape_limit || 500 }} \
+            --limit   ${{ inputs.scrape_limit || 2000 }} \
             --workers ${{ inputs.workers      || 10 }}
