@@ -1,0 +1,64 @@
+name: Scrape Dongchedi
+
+on:
+  workflow_dispatch:
+    inputs:
+      parallel:
+        description: 'Parallel listing requests (collect_ids)'
+        required: false
+        default: '3'
+      scrolls:
+        description: 'Scroll-to-bottom actions per listing request'
+        required: false
+        default: '8'
+      collect_limit:
+        description: 'Max new IDs to upsert in collect step'
+        required: false
+        default: '5000'
+      scrape_limit:
+        description: 'Max cards to scrape this run'
+        required: false
+        default: '200'
+      workers:
+        description: 'Parallel card workers'
+        required: false
+        default: '10'
+  # schedule:
+  #   - cron: '0 19 * * *'    # 03:00 Beijing — раскомментируй когда будешь готов к daily
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Collect IDs (parallel listing requests)
+        env:
+          OXY_USER: ${{ secrets.OXY_USER }}
+          OXY_PASS: ${{ secrets.OXY_PASS }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python collect_ids.py \
+            --parallel ${{ inputs.parallel || 3 }} \
+            --scrolls  ${{ inputs.scrolls  || 8 }} \
+            --limit    ${{ inputs.collect_limit || 5000 }}
+
+      - name: Scrape pending cards
+        env:
+          OXY_USER: ${{ secrets.OXY_USER }}
+          OXY_PASS: ${{ secrets.OXY_PASS }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: |
+          python scrape_dongchedi.py --skip-listing \
+            --limit   ${{ inputs.scrape_limit || 200 }} \
+            --workers ${{ inputs.workers      || 10 }}
