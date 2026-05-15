@@ -1,35 +1,33 @@
 """
-Dongchedi listing ID collector — XHR-capture version.
+Dongchedi listing ID collector — brand × city strategy.
+
+For each (city, brand) pair the script issues one Oxylabs request that
+captures /motor/pc/sh/sh_sku_list XHR responses while the page scrolls.
+Each brand filter shows its own ranked list (≤220 cars per request),
+not just the nationwide top-220 — so the visible pool expands ~10x.
 
 Architecture:
-  Uses Oxylabs "xhr": true to capture /motor/pc/sh/sh_sku_list POST calls
-  the browser makes while scrolling. Each call returns 20 cars as JSON
-  with car_year, mileage, city, brand etc. already populated.
-
-  Vs. HTML-regex version:
-    + Structured data, no regex fragility
-    + Pre-filter by year BEFORE writing pending_ids
-    + Cuts wasted card-page parsing later
-
-  Same Oxylabs cost per request. Same 4-city parallel strategy.
-
-Filtering:
-  Default: only cars with car_year >= MIN_YEAR (2022) are queued.
-  Override with --min-year 0 to disable.
+  - 80 brands × 4 cities = 320 URLs (default).
+  - Requests issued in small concurrent batches (--batch-size) with
+    a short pause between batches to avoid Oxylabs throttling.
+  - Pre-fetches known source_ids; reports real-new yield.
+  - Filters cars with car_year < --min-year BEFORE writing pending_ids.
 
 Usage:
-    python collect_ids.py [--cities beijing,shanghai,guangzhou,shenzhen]
-                          [--scrolls 10] [--min-year 2022] [--limit 5000]
+  python collect_ids.py [--cities ...] [--brands ...] [--scrolls 8]
+                        [--batch-size 4] [--batch-pause 3]
+                        [--min-year 2022] [--limit 5000]
 
-Env vars:
-    OXY_USER, OXY_PASS         — Oxylabs credentials (required)
-    SUPABASE_URL, SUPABASE_KEY — if set, writes to Postgres; otherwise SQLite
+Env:
+  OXY_USER, OXY_PASS         — Oxylabs (required)
+  SUPABASE_URL, SUPABASE_KEY — Postgres if set; else SQLite fallback
 """
 
 import argparse
 import json
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -42,7 +40,9 @@ OXY_PASS = os.environ.get("OXY_PASS", "")
 OXY_URL = "https://realtime.oxylabs.io/v1/queries"
 
 SOURCE = "dongchedi"
+SKU_LIST_PATH = "/motor/pc/sh/sh_sku_list"
 
+# URL position 21 = city code (verified empirically).
 CITY_CODES = {
     "beijing":   ("110000", "北京 Beijing"),
     "shanghai":  ("310000", "上海 Shanghai"),
@@ -51,34 +51,65 @@ CITY_CODES = {
     "tianjin":   ("120000", "天津 Tianjin"),
     "all":       ("x",      "全国 Nationwide"),
 }
-
 DEFAULT_CITIES = "beijing,shanghai,guangzhou,shenzhen"
-DEFAULT_MIN_YEAR = 2022
 
-SKU_LIST_PATH = "/motor/pc/sh/sh_sku_list"
+# URL position 19 = brand_id (verified empirically).
+# Pool of 80 brands — passenger cars only, sorted by importance.
+BRAND_POOL = {
+    # Premium Euro (10)
+    3: "Mercedes-Benz", 4: "BMW", 2: "Audi", 20: "Porsche", 24: "Volvo",
+    19: "Land Rover", 22: "Lexus", 30: "Cadillac", 47: "Bentley", 25: "Maybach",
+    # Sport / Luxury (5)
+    44: "Ferrari", 41: "Rolls-Royce", 80: "Aston Martin", 42: "Lamborghini",
+    86: "McLaren",
+    # Mainstream foreign (12)
+    1: "Volkswagen", 5: "Toyota", 9: "Honda", 10: "Nissan", 7: "Ford",
+    12: "Buick", 11: "Hyundai", 13: "Kia", 63: "Tesla", 6: "Chevrolet",
+    14: "Jeep", 62: "Lincoln",
+    # Niche foreign (8)
+    65: "MINI", 48: "smart", 23: "Skoda", 15: "Mazda", 33: "Subaru",
+    29: "Infiniti", 273: "Genesis", 61: "Peugeot",
+    # Chinese majors (12)
+    16: "BYD", 73: "Geely", 18: "Chery", 17: "Haval", 35: "Changan",
+    36: "Roewe", 59: "Hongqi", 40: "GAC Trumpchi", 174: "Lynk & Co",
+    425: "Tank", 8: "Great Wall", 66: "WEY",
+    # Chinese EV / new energy (13)
+    112: "NIO", 195: "XPeng", 202: "Li Auto", 535: "Xiaomi", 483: "AITO",
+    426: "Zeekr", 242: "Aion", 207: "Leapmotor", 159: "Denza", 395: "Voyah",
+    515: "Deepal", 419: "IM Motors", 475: "AVATR",
+    # Chinese sub-brands / others (18)
+    870: "Changan Qiyuan", 858: "Geely Galaxy", 209: "Jetour", 251: "Exeed",
+    366: "Baojun", 27: "Bestune", 264: "Geometry", 238: "ORA",
+    176: "Arcfox", 381: "Radar", 861: "Fang Cheng Bao", 546: "YangWang",
+    880: "GAC Hyper", 891: "Dongfeng eP", 260: "Jetta", 52: "BAIC Off-road",
+    68: "BAIC",
+    # Italian premium (2)
+    45: "Maserati", 50: "Suzuki",
+}
 
 
-def build_listing_url(city_code: str) -> str:
+def build_listing_url(city_code: str, brand_id: int | None = None) -> str:
     parts = ['x'] * 28
     if city_code != 'x':
         parts[21] = city_code
+    if brand_id is not None:
+        parts[19] = str(brand_id)
     return "https://www.dongchedi.com/usedcar/" + "-".join(parts)
 
 
-def fetch_listing_xhr(city_key: str, scrolls: int) -> tuple[str, list[dict]]:
-    """Fetch one city's listing via Oxylabs XHR capture.
-    Returns (city_key, list_of_cars) from all sh_sku_list responses."""
+def fetch_pair(city_key: str, brand_id: int, scrolls: int) -> tuple[str, int, list[dict]]:
+    """Fetch one (city, brand) pair. Returns (city_key, brand_id, list_of_cars)."""
     if not OXY_USER or not OXY_PASS:
         sys.exit("ERROR: set OXY_USER and OXY_PASS")
 
-    code, label = CITY_CODES[city_key]
-    url = build_listing_url(code)
+    code, _ = CITY_CODES[city_key]
+    brand_label = BRAND_POOL.get(brand_id, str(brand_id))
+    url = build_listing_url(code, brand_id)
 
     instructions = [
         {"type": "scroll_to_bottom", "wait_time_s": 2}
         for _ in range(scrolls)
     ]
-
     payload = {
         "source": "universal",
         "url": url,
@@ -89,27 +120,24 @@ def fetch_listing_xhr(city_key: str, scrolls: int) -> tuple[str, list[dict]]:
         "browser_instructions": instructions,
     }
 
-    print(f"  [{city_key:9s}] {label} + {scrolls} scrolls + XHR capture…")
+    tag = f"{city_key[:9]:9s}/{brand_label[:15]:15s}"
     try:
         r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS), json=payload, timeout=300)
         if r.status_code != 200:
-            print(f"  [{city_key:9s}] HTTP {r.status_code}: {r.text[:200]}")
-            return (city_key, [])
+            print(f"  [{tag}] HTTP {r.status_code}: {r.text[:120]}")
+            return (city_key, brand_id, [])
 
         data = r.json()
-        results = data.get("results", [])
-        xhr_results = [res for res in results if res.get("type") == "xhr"]
+        xhr_results = [res for res in data.get("results", []) if res.get("type") == "xhr"]
         if not xhr_results:
-            print(f"  [{city_key:9s}] No XHR results returned")
-            return (city_key, [])
-
+            print(f"  [{tag}] no XHR captured")
+            return (city_key, brand_id, [])
         xhr_requests = xhr_results[0].get("content", []) or []
 
-        cars_by_sku: dict[int, dict] = {}
+        cars: dict[int, dict] = {}
         api_calls = 0
         for req in xhr_requests:
-            url_str = req.get("url", "")
-            if SKU_LIST_PATH not in url_str:
+            if SKU_LIST_PATH not in req.get("url", ""):
                 continue
             if req.get("method") != "POST" or req.get("status_code") != 200:
                 continue
@@ -125,14 +153,13 @@ def fetch_listing_xhr(city_key: str, scrolls: int) -> tuple[str, list[dict]]:
             for car in items:
                 sku = car.get("sku_id")
                 if sku:
-                    cars_by_sku[sku] = car
+                    cars[sku] = car
 
-        print(f"  [{city_key:9s}] {api_calls} sh_sku_list calls → "
-              f"{len(cars_by_sku)} unique cars")
-        return (city_key, list(cars_by_sku.values()))
+        print(f"  [{tag}] {api_calls:>2} calls → {len(cars):>3} cars")
+        return (city_key, brand_id, list(cars.values()))
     except Exception as e:
-        print(f"  [{city_key:9s}] exception: {e}")
-        return (city_key, [])
+        print(f"  [{tag}] exception: {e}")
+        return (city_key, brand_id, [])
 
 
 def fetch_known_ids() -> set[str]:
@@ -166,12 +193,15 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--cities", type=str, default=DEFAULT_CITIES,
                     help=f"Comma-separated city keys. Available: {','.join(CITY_CODES)}")
-    ap.add_argument("--scrolls", type=int, default=10,
-                    help="scroll_to_bottom actions per city")
-    ap.add_argument("--min-year", type=int, default=DEFAULT_MIN_YEAR,
-                    help="Skip cars older than this year (0 = no filter)")
-    ap.add_argument("--limit", type=int, default=5000,
-                    help="Max IDs to upsert this run")
+    ap.add_argument("--brands", type=str, default="",
+                    help="Comma-separated brand IDs, or 'all' (default: all)")
+    ap.add_argument("--scrolls", type=int, default=8)
+    ap.add_argument("--batch-size", type=int, default=4,
+                    help="Parallel requests per batch")
+    ap.add_argument("--batch-pause", type=int, default=3,
+                    help="Seconds between batches")
+    ap.add_argument("--min-year", type=int, default=2022)
+    ap.add_argument("--limit", type=int, default=5000)
     args = ap.parse_args()
 
     cities = [c.strip() for c in args.cities.split(",") if c.strip()]
@@ -179,31 +209,59 @@ def main() -> None:
     if invalid:
         sys.exit(f"Unknown cities: {invalid}. Available: {list(CITY_CODES.keys())}")
 
+    if not args.brands or args.brands.lower() == "all":
+        brands = list(BRAND_POOL.keys())
+    else:
+        try:
+            brands = [int(b.strip()) for b in args.brands.split(",") if b.strip()]
+        except ValueError:
+            sys.exit("--brands must be 'all' or comma-separated integer IDs")
+
     print(f"Backend: {DB.backend_name()}")
     print(f"Cities ({len(cities)}): {cities}")
-    print(f"Scrolls/city: {args.scrolls}, min_year: {args.min_year}, limit: {args.limit}")
+    print(f"Brands: {len(brands)}")
+    print(f"Total requests: {len(cities) * len(brands)}")
+    print(f"Batch: {args.batch_size} parallel, pause {args.batch_pause}s")
+    print(f"Scrolls/req: {args.scrolls}, min_year: {args.min_year}, limit: {args.limit}")
 
-    print("\nLoading known IDs cache…")
+    jobs: list[tuple[str, int]] = []
+    for c in cities:
+        for b in brands:
+            jobs.append((c, b))
+
+    print(f"\nLoading known IDs cache…")
     known = fetch_known_ids()
     print(f"  already in DB (cars + pending): {len(known)}")
 
-    print(f"\nFiring {len(cities)} parallel XHR-capture requests…")
+    print(f"\nProcessing {len(jobs)} (city,brand) jobs in batches of {args.batch_size}…")
     all_cars: dict[int, dict] = {}
-    per_city_stats: dict[str, int] = {}
+    started_at = time.time()
 
-    with ThreadPoolExecutor(max_workers=len(cities)) as pool:
-        futures = {pool.submit(fetch_listing_xhr, c, args.scrolls): c for c in cities}
-        for fut in as_completed(futures):
-            city_key, cars = fut.result()
-            per_city_stats[city_key] = len(cars)
-            for car in cars:
-                sku = car.get("sku_id")
-                if sku and sku not in all_cars:
-                    all_cars[sku] = car
+    total_batches = (len(jobs) + args.batch_size - 1) // args.batch_size
+    for batch_start in range(0, len(jobs), args.batch_size):
+        batch = jobs[batch_start:batch_start + args.batch_size]
+        batch_num = batch_start // args.batch_size + 1
+        elapsed = int(time.time() - started_at)
+        print(f"\nBatch {batch_num}/{total_batches} (elapsed {elapsed}s, "
+              f"cars so far: {len(all_cars)}):")
 
-    print(f"\nTotal unique cars across cities: {len(all_cars)}")
+        with ThreadPoolExecutor(max_workers=len(batch)) as pool:
+            futures = {
+                pool.submit(fetch_pair, c, b, args.scrolls): (c, b)
+                for c, b in batch
+            }
+            for fut in as_completed(futures):
+                city_key, brand_id, cars = fut.result()
+                for car in cars:
+                    sku = car.get("sku_id")
+                    if sku and sku not in all_cars:
+                        all_cars[sku] = car
 
-    # Filter
+        if batch_start + args.batch_size < len(jobs):
+            time.sleep(args.batch_pause)
+
+    print(f"\nTotal unique cars across all pairs: {len(all_cars)}")
+
     skipped_old = 0
     skipped_known = 0
     to_save: list[tuple[str, dict]] = []
@@ -219,6 +277,7 @@ def main() -> None:
             continue
         metadata = {
             "car_year": year,
+            "brand_id": car.get("brand_id"),
             "brand_name": car.get("brand_name"),
             "series_name": car.get("series_name"),
             "car_name": car.get("car_name"),
@@ -241,10 +300,9 @@ def main() -> None:
             break
 
     final = DB.count_pending(SOURCE)
-    print(f"\nDone. Upserted: {saved} new IDs. Total in pending_ids[{SOURCE}]: {final}")
-    print("\nPer-city yield (unique cars from XHR capture):")
-    for city, count in per_city_stats.items():
-        print(f"  {city:9s}: {count} cars")
+    total_elapsed = int(time.time() - started_at)
+    print(f"\nDone in {total_elapsed}s. Upserted: {saved} new IDs. "
+          f"Total in pending_ids[{SOURCE}]: {final}")
 
 
 if __name__ == "__main__":
