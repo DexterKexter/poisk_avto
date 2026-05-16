@@ -115,8 +115,15 @@ def probe_api(name: str, url: str) -> None:
         j = json.loads(content)
         if isinstance(j, dict):
             print(f"  ✅ JSON dict, top keys: {list(j.keys())}")
+            # Print first chunk of formatted JSON to see structure
+            print(f"  ----- JSON preview (3KB) -----")
+            print(json.dumps(j, ensure_ascii=False, indent=2)[:3000])
+            print(f"  ----- END preview -----")
         elif isinstance(j, list):
             print(f"  ✅ JSON list of {len(j)}")
+            if j:
+                print(f"  ----- first item -----")
+                print(json.dumps(j[0], ensure_ascii=False, indent=2)[:2000])
         path = os.path.join(OUT_DIR, f"yiche_v3_api_{name}.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump(j, f, ensure_ascii=False, indent=2)
@@ -132,26 +139,21 @@ def main() -> None:
     # Step 1: XHR capture on the open catalog hub
     probe_xhr("car_hub", "https://car.yiche.com/")
 
-    # Step 2: Direct API guesses based on observed pattern
-    # From homepage we saw: mapi.yiche.com/web_api/{module}_api/api/v1/...
-    # Guess for car data:
-    API_GUESSES = [
-        ("serial_list",
-         "https://mapi.yiche.com/web_api/serial_api/api/v1/serial/list"
-         "?cid=508"),
-        ("series_list",
-         "https://mapi.yiche.com/web_api/series_api/api/v1/series/list"
-         "?cid=508"),
-        ("car_brand_list",
-         "https://mapi.yiche.com/web_api/car_api/api/v1/brand/list"
-         "?cid=508"),
-        ("series_select",
-         "https://mapi.yiche.com/serial_api/api/v1/serial/select?cid=508"),
-        ("style_api",
-         "https://mapi.yiche.com/style_api/api/v1/style/all_brand_master"
-         "?cid=508"),
+    # Step 2: Hit the REAL endpoints found by step 1 directly,
+    # without render. If they return JSON without browser context,
+    # we have a $0.002/request path. URL-encoded param={} for empty.
+    REAL_APIS = [
+        ("hot_serials",
+         "https://mapi.yiche.com/web_api/car_model_api/api/v1/serial/"
+         "search_hot_serials?cid=508&param=%7B%7D"),
+        ("hot_masters",
+         "https://mapi.yiche.com/web_api/car_model_api/api/v1/master/"
+         "search_hot_masters?cid=508&param=%7B%22type%22%3A2%7D"),
+        ("area_list",
+         "https://mapi.yiche.com/web_app/api/v1/city/get_area_list"
+         "?cid=508&param=%7B%7D"),
     ]
-    for name, url in API_GUESSES:
+    for name, url in REAL_APIS:
         probe_api(name, url)
 
     print("\n========== DONE ==========")
