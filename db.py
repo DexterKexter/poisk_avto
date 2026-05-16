@@ -128,6 +128,92 @@ def pg_mark_failed(source: str, source_id: str) -> bool:
     return r.status_code in (200, 204)
 
 
+SOLD_FAIL_THRESHOLD = 3
+
+
+def pg_get_alive_cars(source: str, limit: int | None = None) -> list[dict]:
+    """Cars with sold_at IS NULL, oldest last_refresh_at first (nulls first)."""
+    path = (
+        f"cars?source=eq.{source}&sold_at=is.null"
+        f"&select=source_id,price_original,price_currency,km_age,"
+        f"refresh_failed_attempts,last_refresh_at"
+        f"&order=last_refresh_at.asc.nullsfirst"
+    )
+    if limit:
+        path += f"&limit={limit}"
+    out: list[dict] = []
+    offset = 0
+    page = 1000
+    while True:
+        page_path = path + f"&offset={offset}&limit={page}"
+        r = _pg_request("GET", page_path)
+        if r.status_code != 200:
+            print(f"  PG get_alive FAIL: {r.text[:200]}")
+            break
+        rows = r.json()
+        out.extend(rows)
+        if len(rows) < page or (limit and len(out) >= limit):
+            break
+        offset += page
+    return out[:limit] if limit else out
+
+
+def pg_mark_refresh_success(source: str, source_id: str) -> bool:
+    r = _pg_request(
+        "PATCH",
+        f"cars?source=eq.{source}&source_id=eq.{source_id}",
+        json={"refresh_failed_attempts": 0, "last_refresh_at": now_iso()},
+    )
+    return r.status_code in (200, 204)
+
+
+def pg_mark_refresh_failed(source: str, source_id: str) -> int:
+    """Increment refresh_failed_attempts. Returns new count, -1 on error."""
+    r = _pg_request(
+        "GET",
+        f"cars?source=eq.{source}&source_id=eq.{source_id}"
+        f"&select=refresh_failed_attempts",
+    )
+    if r.status_code != 200 or not r.json():
+        return -1
+    current = r.json()[0].get("refresh_failed_attempts") or 0
+    new_val = current + 1
+    r = _pg_request(
+        "PATCH",
+        f"cars?source=eq.{source}&source_id=eq.{source_id}",
+        json={"refresh_failed_attempts": new_val},
+    )
+    if r.status_code not in (200, 204):
+        return -1
+    return new_val
+
+
+def pg_mark_sold(source: str, source_id: str) -> bool:
+    r = _pg_request(
+        "PATCH",
+        f"cars?source=eq.{source}&source_id=eq.{source_id}",
+        json={"sold_at": now_iso()},
+    )
+    return r.status_code in (200, 204)
+
+
+def pg_log_change(source: str, source_id: str, change_type: str,
+                  old_value: dict, new_value: dict) -> bool:
+    r = _pg_request(
+        "POST", "changes",
+        headers={"Prefer": "return=minimal"},
+        json={
+            "source": source,
+            "source_id": source_id,
+            "change_type": change_type,
+            "old_value": old_value,
+            "new_value": new_value,
+            "created_at": now_iso(),
+        },
+    )
+    return r.status_code in (200, 201, 204)
+
+
 def pg_count(table: str, where: str = "") -> int:
     path = f"{table}?select=count"
     if where:
@@ -185,9 +271,23 @@ CREATE TABLE IF NOT EXISTS cars (
 
     source_data TEXT, spu_id TEXT,
     first_seen TEXT, last_seen TEXT,
+    sold_at TEXT,
+    refresh_failed_attempts INTEGER NOT NULL DEFAULT 0,
+    last_refresh_at TEXT,
 
     PRIMARY KEY (source, source_id)
 );
+
+CREATE TABLE IF NOT EXISTS changes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    change_type TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_changes_src ON changes(source, source_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_cars_mark ON cars(mark);
 CREATE INDEX IF NOT EXISTS idx_cars_year ON cars(year);
@@ -217,6 +317,9 @@ def sqlite_conn() -> sqlite3.Connection:
         for stmt in (
             "ALTER TABLE pending_ids ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE pending_ids ADD COLUMN last_failed_at TEXT",
+            "ALTER TABLE cars ADD COLUMN sold_at TEXT",
+            "ALTER TABLE cars ADD COLUMN refresh_failed_attempts INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE cars ADD COLUMN last_refresh_at TEXT",
         ):
             try:
                 _sqlite_conn.execute(stmt)
@@ -293,6 +396,76 @@ def sqlite_mark_failed(source: str, source_id: str) -> bool:
     return True
 
 
+def sqlite_get_alive_cars(source: str, limit: int | None = None) -> list[dict]:
+    conn = sqlite_conn()
+    sql = (
+        "SELECT source_id, price_original, price_currency, km_age, "
+        "refresh_failed_attempts, last_refresh_at "
+        "FROM cars WHERE source = ? AND sold_at IS NULL "
+        "ORDER BY (last_refresh_at IS NULL) DESC, last_refresh_at ASC"
+    )
+    params: tuple = (source,)
+    if limit:
+        sql += " LIMIT ?"
+        params = (source, limit)
+    rows = conn.execute(sql, params).fetchall()
+    cols = ["source_id", "price_original", "price_currency", "km_age",
+            "refresh_failed_attempts", "last_refresh_at"]
+    return [dict(zip(cols, r)) for r in rows]
+
+
+def sqlite_mark_refresh_success(source: str, source_id: str) -> bool:
+    conn = sqlite_conn()
+    conn.execute(
+        "UPDATE cars SET refresh_failed_attempts = 0, last_refresh_at = ? "
+        "WHERE source = ? AND source_id = ?",
+        (now_iso(), source, source_id),
+    )
+    conn.commit()
+    return True
+
+
+def sqlite_mark_refresh_failed(source: str, source_id: str) -> int:
+    conn = sqlite_conn()
+    conn.execute(
+        "UPDATE cars SET refresh_failed_attempts = refresh_failed_attempts + 1 "
+        "WHERE source = ? AND source_id = ?",
+        (source, source_id),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT refresh_failed_attempts FROM cars "
+        "WHERE source = ? AND source_id = ?",
+        (source, source_id),
+    ).fetchone()
+    return row[0] if row else -1
+
+
+def sqlite_mark_sold(source: str, source_id: str) -> bool:
+    conn = sqlite_conn()
+    conn.execute(
+        "UPDATE cars SET sold_at = ? WHERE source = ? AND source_id = ?",
+        (now_iso(), source, source_id),
+    )
+    conn.commit()
+    return True
+
+
+def sqlite_log_change(source: str, source_id: str, change_type: str,
+                      old_value: dict, new_value: dict) -> bool:
+    conn = sqlite_conn()
+    conn.execute(
+        "INSERT INTO changes (source, source_id, change_type, "
+        "old_value, new_value, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (source, source_id, change_type,
+         json.dumps(old_value, ensure_ascii=False),
+         json.dumps(new_value, ensure_ascii=False),
+         now_iso()),
+    )
+    conn.commit()
+    return True
+
+
 def sqlite_count(table: str, where_sql: str = "", params: tuple = ()) -> int:
     conn = sqlite_conn()
     sql = f"SELECT COUNT(*) FROM {table}"
@@ -325,6 +498,37 @@ def mark_failed(source: str, source_id: str) -> bool:
     if USE_POSTGRES:
         return pg_mark_failed(source, source_id)
     return sqlite_mark_failed(source, source_id)
+
+
+def get_alive_cars(source: str, limit: int | None = None) -> list[dict]:
+    if USE_POSTGRES:
+        return pg_get_alive_cars(source, limit)
+    return sqlite_get_alive_cars(source, limit)
+
+
+def mark_refresh_success(source: str, source_id: str) -> bool:
+    if USE_POSTGRES:
+        return pg_mark_refresh_success(source, source_id)
+    return sqlite_mark_refresh_success(source, source_id)
+
+
+def mark_refresh_failed(source: str, source_id: str) -> int:
+    if USE_POSTGRES:
+        return pg_mark_refresh_failed(source, source_id)
+    return sqlite_mark_refresh_failed(source, source_id)
+
+
+def mark_sold(source: str, source_id: str) -> bool:
+    if USE_POSTGRES:
+        return pg_mark_sold(source, source_id)
+    return sqlite_mark_sold(source, source_id)
+
+
+def log_change(source: str, source_id: str, change_type: str,
+               old_value: dict, new_value: dict) -> bool:
+    if USE_POSTGRES:
+        return pg_log_change(source, source_id, change_type, old_value, new_value)
+    return sqlite_log_change(source, source_id, change_type, old_value, new_value)
 
 
 def count_cars(source: str = "") -> int:
