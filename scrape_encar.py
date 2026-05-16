@@ -269,6 +269,9 @@ def parse_car(api_car: dict) -> dict | None:
             "vin": api_car.get("vin"),
             "spu_id": "",
 
+            "published_at": manage.get("firstAdvertisedDateTime"),
+            "listing_updated_at": manage.get("modifyDateTime"),
+
             "source_data": {
                 "vehicle_no": api_car.get("vehicleNo"),
                 "vehicle_id": api_car.get("vehicleId"),
