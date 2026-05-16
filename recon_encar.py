@@ -150,6 +150,17 @@ def main() -> None:
                                           or a.get("parsed_json")):
         print("\n🎯 SUCCESS without render — the API is openly accessible.")
         print("    Future scrape_encar.py can use this path for ~$0.002 per batch of 5.")
+
+        # Step 8: also dump full first car JSON to stdout so we can map
+        # fields without downloading the artifact.
+        saved_file = a.get("saved")
+        if saved_file and os.path.exists(saved_file):
+            with open(saved_file, encoding="utf-8") as f:
+                obj = json.load(f)
+            car = obj[0] if isinstance(obj, list) and obj else obj
+            print("\n========== FULL CAR FROM API (all nested fields) ==========")
+            print(json.dumps(car, ensure_ascii=False, indent=2))
+            print("========== END FULL CAR ==========\n")
     else:
         print(f"\nA failed (status {a.get('target_status')}). "
               "Trying again WITH render as fallback…")
