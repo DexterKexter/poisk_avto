@@ -1,28 +1,19 @@
 """
-recon_autocango.py v2 — autocango not Next.js, find where cars actually live.
+recon_autocango.py v3 — capture POST request bodies for /api/web/newcar/search.
 
-v1 results:
-  - HTTP 200, HTML 743KB
-  - No __NEXT_DATA__
-  - No real inline JSON state (matched empty placeholder)
-  - 0 car-like arrays via walker
+v2 found the API: POST https://www.autocango.com/api/web/newcar/search.
+But we only saved response. Now we need the REQUEST body to replicate.
 
-v2 strategy:
-  1. Print first 16KB of HTML to stdout (see actual structure)
-  2. Look for ALL inline JSON patterns:
-     - <script type="application/json">
-     - <script type="application/ld+json">
-     - var XXX = {...}; / window.XXX = {...};
-     - data-* attributes with JSON
-  3. Capture XHR — maybe data loads via API after page render
-  4. Find <a href> links to detail pages (ACN-prefixed IDs)
+v3:
+  1. XHR capture with FULL request + response printed
+  2. Pretty-print request body & response body of each POST to /api/web/newcar/*
+  3. Save everything as artifact
 
-Env: OXY_USER, OXY_PASS
+Then if response shows cars — we know how to call the API directly.
 """
 
 import json
 import os
-import re
 import sys
 
 import requests
@@ -36,48 +27,11 @@ os.makedirs(OUT_DIR, exist_ok=True)
 
 TARGET_URL = "https://www.autocango.com/newcar"
 
-# Regex for various inline JSON patterns
-JSON_SCRIPT_RE = re.compile(
-    r'<script[^>]*type="application/(?:ld\+)?json"[^>]*>(.*?)</script>',
-    re.DOTALL,
-)
-VAR_JSON_RE = re.compile(
-    r'(?:var|let|const|window\.)\s*(\w+)\s*=\s*(\{[^;<]{200,}\})\s*[;<]',
-    re.DOTALL,
-)
-HREF_RE = re.compile(r'href="([^"]+)"')
-ACN_ID_RE = re.compile(r'ACN\d{6,10}')
 
-CAR_HINT_KEYS = {
-    "price", "year", "model", "make", "brand", "manufacturer",
-    "vin", "id", "carid", "msrp", "fob", "exw",
-    "fueltype", "displacement", "horsepower",
-    "image", "imageurl", "photo", "thumbnail",
-    "seatcount", "transmission",
-}
+def main() -> None:
+    if not OXY_USER or not OXY_PASS:
+        sys.exit("ERROR: OXY_USER / OXY_PASS not set")
 
-
-def walk(node, path="$", out=None, depth=0, max_depth=10):
-    if out is None:
-        out = []
-    if depth > max_depth:
-        return out
-    if isinstance(node, list):
-        if node and isinstance(node[0], dict):
-            keys = {k.lower() for k in node[0].keys() if isinstance(k, str)}
-            score = len(keys & CAR_HINT_KEYS)
-            out.append({
-                "path": path, "len": len(node), "score": score,
-                "first_keys": list(node[0].keys())[:25],
-                "sample_3": node[:3],
-            })
-    elif isinstance(node, dict):
-        for k, v in node.items():
-            walk(v, f"{path}.{k}", out, depth + 1, max_depth)
-    return out
-
-
-def fetch_with_xhr() -> dict:
     payload = {
         "source": "universal",
         "url": TARGET_URL,
@@ -89,171 +43,91 @@ def fetch_with_xhr() -> dict:
             for _ in range(4)
         ],
     }
-    print(f"\nFetching {TARGET_URL} with xhr=True…")
+    print(f"Fetching {TARGET_URL} with xhr=True…")
     r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
                       json=payload, timeout=300)
     if r.status_code != 200:
-        print(f"  OXY HTTP {r.status_code}: {r.text[:200]}")
-        return {}
-    return r.json()
+        sys.exit(f"OXY HTTP {r.status_code}: {r.text[:300]}")
 
-
-def fetch_html_only() -> str | None:
-    """Get HTML body (without xhr suppression)."""
-    payload = {
-        "source": "universal",
-        "url": TARGET_URL,
-        "geo_location": "China",
-        "render": "html",
-        "browser_instructions": [
-            {"type": "scroll_to_bottom", "wait_time_s": 2}
-            for _ in range(3)
-        ],
-    }
-    print(f"\nFetching {TARGET_URL} for HTML body…")
-    r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
-                      json=payload, timeout=300)
-    if r.status_code != 200:
-        print(f"  OXY HTTP {r.status_code}")
-        return None
     results = r.json().get("results", []) or []
-    if not results:
-        return None
-    content = results[0].get("content")
-    return content if isinstance(content, str) else None
-
-
-def analyze_html(html: str) -> None:
-    print(f"\n========== HTML analysis ({len(html)} chars) ==========")
-
-    # Save full
-    full_path = os.path.join(OUT_DIR, "autocango_full.html")
-    with open(full_path, "w", encoding="utf-8") as f:
-        f.write(html)
-    print(f"Full HTML → {full_path}")
-
-    # Print head
-    print(f"\n----- First 4KB of HTML -----")
-    print(html[:4000])
-    print(f"----- /First 4KB -----")
-
-    # All <script type="application/json"> blocks
-    json_blocks = JSON_SCRIPT_RE.findall(html)
-    print(f"\nFound {len(json_blocks)} <script type=application/(ld+)json> blocks")
-    for i, block in enumerate(json_blocks[:5]):
-        block_stripped = block.strip()
-        if not block_stripped:
-            continue
-        print(f"\n  Block {i+1} ({len(block)} chars): first 200 chars:")
-        print(f"  {block_stripped[:200]}")
-        try:
-            obj = json.loads(block_stripped)
-            print(f"  ✅ Valid JSON, type: {type(obj).__name__}")
-            if isinstance(obj, dict):
-                print(f"     top keys: {list(obj.keys())[:10]}")
-                # Walk for cars
-                cars_found = walk(obj)
-                if cars_found:
-                    cars_found.sort(key=lambda x: (-x["score"], -x["len"]))
-                    best = cars_found[0]
-                    if best["score"] >= 2:
-                        print(f"  🎯 Best candidate: {best['path']} ({best['len']} items)")
-                        print(f"     keys: {best['first_keys']}")
-                        save = os.path.join(OUT_DIR, f"autocango_jsonblock_{i+1}.json")
-                        with open(save, "w", encoding="utf-8") as f:
-                            json.dump(obj, f, ensure_ascii=False, indent=2)
-                        print(f"     Saved → {save}")
-                        if best["sample_3"]:
-                            print(f"     ===== FIRST CAR =====")
-                            print(json.dumps(best["sample_3"][0],
-                                             ensure_ascii=False, indent=2)[:2000])
-                            print(f"     ===== END =====")
-        except Exception as e:
-            print(f"  Not valid JSON: {e}")
-
-    # All var/window/let/const = {...} patterns
-    print(f"\nLooking for `var/window/let/const X = {{...}}` blobs…")
-    vars_found = VAR_JSON_RE.findall(html)
-    print(f"Found {len(vars_found)} candidate blobs")
-    for var_name, blob in vars_found[:10]:
-        try:
-            obj = json.loads(blob)
-            print(f"  {var_name}: ✅ JSON ({len(blob)} chars)")
-            if isinstance(obj, dict):
-                print(f"     top keys: {list(obj.keys())[:10]}")
-                cars_found = walk(obj)
-                if cars_found and cars_found[0]["score"] >= 2:
-                    best = cars_found[0]
-                    print(f"  🎯 Car array at {best['path']} ({best['len']} items)")
-        except Exception:
-            print(f"  {var_name}: blob found ({len(blob)} chars) but invalid JSON")
-
-    # ACN IDs visible
-    acn_ids = sorted(set(ACN_ID_RE.findall(html)))
-    print(f"\nFound {len(acn_ids)} unique ACN-prefixed IDs in HTML")
-    if acn_ids:
-        print(f"  First 10: {acn_ids[:10]}")
-
-    # Internal links to detail pages
-    hrefs = HREF_RE.findall(html)
-    detail_links = sorted({h for h in hrefs
-                            if "autocango.com" in h
-                            and ("/newcar/" in h or "ACN" in h)
-                            and h != "/newcar"})
-    print(f"\nInternal autocango links to newcar/detail: {len(detail_links)}")
-    for link in detail_links[:15]:
-        print(f"  {link}")
-
-
-def analyze_xhr(data: dict) -> None:
-    results = data.get("results", []) or []
     xhr_block = next((res for res in results if res.get("type") == "xhr"), None)
     if not xhr_block:
-        print("\nNo XHR block in response")
-        return
+        sys.exit("No XHR block captured")
+
     captured = xhr_block.get("content", []) or []
-    print(f"\n========== XHR ({len(captured)} captured) ==========")
-    api_calls = []
+    print(f"\nCaptured {len(captured)} XHR calls\n")
+
+    # Filter to newcar/search ones
+    relevant = []
     for req in captured:
         url = req.get("url", "") or ""
-        if any(s in url for s in (
-            "sentry", "google", "doubleclick", "/ads/", "/assets/",
-            "/static/", "fonts.", "tracker", "/log?",
-        )):
-            continue
-        size = len(req.get("response_body") or "")
-        if size < 100:
-            continue
-        method = req.get("method") or "?"
-        print(f"  {method} {req.get('status_code')} {size:>7}b: {url[:180]}")
-        if "autocango" in url or "/api" in url.lower():
-            api_calls.append(req)
-    if api_calls:
-        save = os.path.join(OUT_DIR, "autocango_xhr_api.json")
-        with open(save, "w", encoding="utf-8") as f:
-            json.dump([{
-                "url": r.get("url"),
-                "method": r.get("method"),
-                "status": r.get("status_code"),
-                "response_body_preview": (r.get("response_body") or "")[:3000],
-            } for r in api_calls], f, ensure_ascii=False, indent=2)
-        print(f"\n  Saved {len(api_calls)} API responses → {save}")
+        if "newcar/search" in url or "autocango.com/api" in url:
+            relevant.append(req)
 
+    print(f"Relevant POSTs ({len(relevant)}):")
+    for i, req in enumerate(relevant, 1):
+        url = req.get("url", "")
+        method = req.get("method", "?")
+        status = req.get("status_code", "?")
+        request_body = req.get("request_body") or ""
+        response_body = req.get("response_body") or ""
 
-def main() -> None:
-    if not OXY_USER or not OXY_PASS:
-        sys.exit("ERROR: OXY_USER / OXY_PASS not set")
+        print(f"\n========== CALL {i}: {method} {url} ==========")
+        print(f"Status: {status}")
+        print(f"Request body ({len(request_body)} chars):")
+        print(f"  {request_body[:1500]}")
+        if request_body:
+            try:
+                rb = json.loads(request_body)
+                print(f"  Parsed: {json.dumps(rb, ensure_ascii=False, indent=2)[:1500]}")
+            except Exception:
+                pass
 
-    # Step 1: full HTML for inspection
-    html = fetch_html_only()
-    if html:
-        analyze_html(html)
+        print(f"\nResponse body ({len(response_body)} chars), first 2000 chars:")
+        print(f"  {response_body[:2000]}")
 
-    # Step 2: xhr capture for API discovery
-    data = fetch_with_xhr()
-    if data:
-        analyze_xhr(data)
+        try:
+            resp = json.loads(response_body)
+            if isinstance(resp, dict):
+                print(f"\n  ✅ JSON dict, top keys: {list(resp.keys())}")
+                # Look for car list
+                def find_car_list(obj, depth=0):
+                    if depth > 6:
+                        return None
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            if isinstance(v, list) and v and isinstance(v[0], dict):
+                                first = v[0]
+                                if any(hint in str(first).lower() for hint in
+                                       ("price", "model", "make", "brand", "msrp")):
+                                    return (k, v)
+                            result = find_car_list(v, depth + 1)
+                            if result:
+                                return result
+                    return None
+                found = find_car_list(resp)
+                if found:
+                    key, cars = found
+                    print(f"  🎯 Car list at '{key}' ({len(cars)} cars)")
+                    print(f"  First car keys: {list(cars[0].keys())}")
+                    print(f"  ===== FIRST CAR =====")
+                    print(json.dumps(cars[0], ensure_ascii=False, indent=2)[:3000])
+                    print(f"  ===== END =====")
+        except Exception as e:
+            print(f"  Not JSON: {e}")
 
+    # Save everything
+    out_path = os.path.join(OUT_DIR, "autocango_v3_full.json")
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump([{
+            "url": r.get("url"),
+            "method": r.get("method"),
+            "status": r.get("status_code"),
+            "request_body": r.get("request_body"),
+            "request_headers": r.get("request_headers"),
+            "response_body": r.get("response_body"),
+        } for r in relevant], f, ensure_ascii=False, indent=2)
+    print(f"\nSaved → {out_path}")
     print("\n========== DONE ==========")
 
 
