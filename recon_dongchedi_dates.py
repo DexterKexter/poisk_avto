@@ -132,19 +132,37 @@ def main() -> None:
     except (KeyError, TypeError):
         sys.exit("skuDetail not found in __NEXT_DATA__")
 
-    print(f"✅ skuDetail loaded: {len(sku)} top-level keys")
-    print(f"   top keys: {list(sku.keys())[:30]}\n")
+    print(f"✅ skuDetail loaded: {len(sku)} top-level keys\n")
 
     sku_path = os.path.join(OUT_DIR, f"dongchedi_skuDetail_{card_id}.json")
     with open(sku_path, "w", encoding="utf-8") as f:
         json.dump(sku, f, ensure_ascii=False, indent=2)
     print(f"Full skuDetail → {sku_path}\n")
 
-    # Print ALL 69 top-level keys for context
-    print("========== ALL TOP-LEVEL KEYS ==========")
+    # Also save the WHOLE __NEXT_DATA__ — date might live outside skuDetail.
+    full_path = os.path.join(OUT_DIR, f"dongchedi_next_data_{card_id}.json")
+    with open(full_path, "w", encoding="utf-8") as f:
+        json.dump(nd, f, ensure_ascii=False, indent=2)
+    print(f"Full __NEXT_DATA__ → {full_path}\n")
+
+    # Inspect important_params / other_params lists explicitly
+    for list_key in ("important_params", "other_params"):
+        items = sku.get(list_key) or []
+        print(f"========== {list_key} ({len(items)} items) ==========")
+        for it in items:
+            if isinstance(it, dict):
+                # Most dongchedi params look like {"name": "上牌时间", "value": "2024-03"}
+                name = it.get("name", "")
+                value = it.get("value", "")
+                print(f"  {name} = {value!r}")
+            else:
+                print(f"  {it}")
+        print()
+
+    # Print ALL skuDetail top-level keys for context
+    print("========== skuDetail ALL TOP-LEVEL KEYS ==========")
     for k in sku.keys():
         v = sku[k]
-        type_str = type(v).__name__
         if isinstance(v, (str, int, float, bool)) or v is None:
             v_str = repr(v)[:80]
         elif isinstance(v, list):
@@ -152,11 +170,26 @@ def main() -> None:
         elif isinstance(v, dict):
             v_str = f"<dict keys={list(v.keys())[:6]}>"
         else:
-            v_str = type_str
+            v_str = type(v).__name__
         print(f"  {k}: {v_str}")
 
-    # Find date-shaped values OR keys with date-hint name
-    dates = walk_for_dates(sku)
+    # Also peek at pageProps top-level (in case date lives outside skuDetail)
+    pp = nd.get("props", {}).get("pageProps", {})
+    print("\n========== props.pageProps TOP-LEVEL KEYS ==========")
+    for k in pp.keys():
+        v = pp[k]
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            v_str = repr(v)[:80]
+        elif isinstance(v, list):
+            v_str = f"<list {len(v)}>"
+        elif isinstance(v, dict):
+            v_str = f"<dict keys={list(v.keys())[:8]}>"
+        else:
+            v_str = type(v).__name__
+        print(f"  {k}: {v_str}")
+
+    # Find date-shaped values OR keys with date-hint name — walk WHOLE __NEXT_DATA__
+    dates = walk_for_dates(nd)
     # Sort: real dates first, then hint-only, then by path
     dates.sort(key=lambda d: (not d["value_is_date"], not d["key_has_hint"], d["path"]))
 
