@@ -185,7 +185,7 @@ def main() -> None:
         except Exception:
             pass
 
-    # 4. ANY <script type="application/json">
+    # 4. ANY <script type="application/json"> — Nuxt 3 payload
     found_any = False
     for i, (script_id, body) in enumerate(ANY_JSON_SCRIPT_RE.findall(content)):
         body = body.strip()
@@ -196,16 +196,47 @@ def main() -> None:
         except Exception:
             continue
         found_any = True
-        print(f"\n✅ <script type=application/json id={script_id!r}> ({len(body)} chars)")
-        if isinstance(obj, dict):
-            print(f"   top keys: {list(obj.keys())[:10]}")
+        print(f"\n✅ <script type=application/json id={script_id!r}> "
+              f"({len(body)} chars)")
+        print(f"   Top-level type: {type(obj).__name__}")
+        if isinstance(obj, list):
+            print(f"   List length: {len(obj)}")
+            print(f"   Types of first 30 items:")
+            for j, item in enumerate(obj[:30]):
+                t = type(item).__name__
+                preview = (str(item)[:60] + "…") if len(str(item)) > 60 else str(item)
+                print(f"     [{j}] {t}: {preview}")
+        elif isinstance(obj, dict):
+            print(f"   Top keys: {list(obj.keys())[:15]}")
+
+        # Search for any of the ACU/ACN IDs we saw in HTML within this JSON
+        id_matches = re.findall(r'\b[A-Z]{2,4}\d{6,10}\b', content)
+        unique_ids = sorted(set(id_matches))[:3]  # take first 3
+        print(f"\n   Looking up first 3 IDs in JSON body…")
+        for cid in unique_ids:
+            idx = body.find(cid)
+            if idx >= 0:
+                # Print 800 chars surrounding the ID
+                start = max(0, idx - 300)
+                end = min(len(body), idx + 500)
+                snippet = body[start:end]
+                print(f"\n   ✅ Found '{cid}' at position {idx}, context:")
+                print(f"   ...{snippet}...")
+                print()
+
+        # Dump entire parsed JSON to artifact for offline inspection
+        out_path = os.path.join(OUT_DIR, f"autocango_v5_script_{i}.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2)
+        print(f"   Saved → {out_path}")
+
         if report_cars(f"Cars in script_{i}", obj):
             return
 
     if not found_any:
-        print("\n❌ No inline JSON with cars found")
+        print("\n❌ No inline JSON found")
 
-    # 5. Last resort: regex-scan HTML for car IDs (ACN-prefix or similar)
+    # 5. Last resort: regex-scan HTML for car IDs (ACN/ACU-prefix etc)
     id_matches = re.findall(r'\b[A-Z]{2,4}\d{6,10}\b', content)
     print(f"\n  ID-like tokens in HTML: {len(set(id_matches))} unique")
     if id_matches:
