@@ -40,37 +40,48 @@ DATE_KEY_HINTS = ("time", "date", "at", "publish", "online", "create",
                   "update", "modif", "regist", "first", "last")
 
 
-def is_date_like(value) -> bool:
+def is_date_like_value(value) -> bool:
     if isinstance(value, str):
         return bool(ISO_DATE_RE.match(value)) or bool(
             re.search(r'\d{4}[-/年]\d{1,2}', value)
         )
     if isinstance(value, (int, float)):
-        # Unix seconds: 1e9 (~2001) to 1e10 (~2286); milliseconds: ×1000.
-        if 1e9 < value < 5e10:
-            return True
+        # Unix seconds (1e9..4e9 ≈ 2001..2096) or milliseconds (1e12..4e12).
+        return (1e9 < value < 4e9) or (1e12 < value < 4e12)
     return False
 
 
+def key_has_date_hint(key: str) -> bool:
+    if not isinstance(key, str):
+        return False
+    lk = key.lower()
+    return any(h in lk for h in DATE_KEY_HINTS)
+
+
 def walk_for_dates(node, path="$", out=None, depth=0, max_depth=10):
+    """Collect fields where EITHER the value looks like a date OR
+    the key contains a date-hint word. Catches both real dates and
+    suspicious-but-empty fields."""
     if out is None:
         out = []
     if depth > max_depth:
         return out
     if isinstance(node, dict):
         for k, v in node.items():
-            lk = k.lower() if isinstance(k, str) else ""
-            if is_date_like(v):
-                hint_match = any(h in lk for h in DATE_KEY_HINTS)
+            val_match = is_date_like_value(v)
+            key_match = key_has_date_hint(k)
+            if val_match or key_match:
                 out.append({
                     "path": f"{path}.{k}",
                     "key": k,
                     "value": v,
-                    "hint_in_key": hint_match,
+                    "value_is_date": val_match,
+                    "key_has_hint": key_match,
+                    "value_type": type(v).__name__,
                 })
             walk_for_dates(v, f"{path}.{k}", out, depth + 1, max_depth)
     elif isinstance(node, list):
-        for i, item in enumerate(node[:3]):  # only sample first 3
+        for i, item in enumerate(node[:3]):
             walk_for_dates(item, f"{path}[{i}]", out, depth + 1, max_depth)
     return out
 
@@ -129,17 +140,39 @@ def main() -> None:
         json.dump(sku, f, ensure_ascii=False, indent=2)
     print(f"Full skuDetail → {sku_path}\n")
 
-    # Find date-shaped values anywhere in skuDetail
-    dates = walk_for_dates(sku)
-    # Sort: keys with date hints first
-    dates.sort(key=lambda d: (not d["hint_in_key"], d["path"]))
+    # Print ALL 69 top-level keys for context
+    print("========== ALL TOP-LEVEL KEYS ==========")
+    for k in sku.keys():
+        v = sku[k]
+        type_str = type(v).__name__
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            v_str = repr(v)[:80]
+        elif isinstance(v, list):
+            v_str = f"<list {len(v)}>"
+        elif isinstance(v, dict):
+            v_str = f"<dict keys={list(v.keys())[:6]}>"
+        else:
+            v_str = type_str
+        print(f"  {k}: {v_str}")
 
-    print(f"========== DATE-LIKE FIELDS ({len(dates)}) ==========")
-    for d in dates[:50]:
-        flag = "🎯" if d["hint_in_key"] else "  "
+    # Find date-shaped values OR keys with date-hint name
+    dates = walk_for_dates(sku)
+    # Sort: real dates first, then hint-only, then by path
+    dates.sort(key=lambda d: (not d["value_is_date"], not d["key_has_hint"], d["path"]))
+
+    print(f"\n========== DATE-LIKE FIELDS ({len(dates)}) ==========")
+    for d in dates[:60]:
+        if d["value_is_date"] and d["key_has_hint"]:
+            flag = "🎯🎯"  # both — most likely the answer
+        elif d["value_is_date"]:
+            flag = "✅"
+        elif d["key_has_hint"]:
+            flag = "⚠️ "  # hint but empty/zero
+        else:
+            flag = "  "
         v = d["value"]
         v_str = repr(v) if isinstance(v, str) else str(v)
-        print(f"{flag} {d['path']} = {v_str[:80]}")
+        print(f"{flag} {d['path']} ({d['value_type']}) = {v_str[:80]}")
 
     print("\n========== DONE ==========")
 
