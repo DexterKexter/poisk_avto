@@ -270,6 +270,7 @@ CREATE TABLE IF NOT EXISTS cars (
     shop_address TEXT, shop_id TEXT, shop_cars_count INTEGER, sales_range TEXT,
 
     source_data TEXT, spu_id TEXT,
+    vin TEXT,
     first_seen TEXT, last_seen TEXT,
     sold_at TEXT,
     refresh_failed_attempts INTEGER NOT NULL DEFAULT 0,
@@ -320,6 +321,7 @@ def sqlite_conn() -> sqlite3.Connection:
             "ALTER TABLE cars ADD COLUMN sold_at TEXT",
             "ALTER TABLE cars ADD COLUMN refresh_failed_attempts INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE cars ADD COLUMN last_refresh_at TEXT",
+            "ALTER TABLE cars ADD COLUMN vin TEXT",
         ):
             try:
                 _sqlite_conn.execute(stmt)
