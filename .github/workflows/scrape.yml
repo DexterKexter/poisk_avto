@@ -1,6 +1,9 @@
 name: Scrape Dongchedi
 
 on:
+  schedule:
+    # Daily 19:00 UTC = 03:00 Beijing (next day). Discovers + parses new cars.
+    - cron: '0 19 * * *'
   workflow_dispatch:
     inputs:
       cities:

@@ -1,435 +1,473 @@
-# Dongchedi.com Scraper — Документация
+# Dongchedi.com — парсер б/у автомобилей
 
-Парсер объявлений о продаже б/у автомобилей с китайского сайта dongchedi.com через Oxylabs Web Scraper API. Собирает структурированные данные в SQLite базу.
+Парсер объявлений с китайского классифайда [dongchedi.com](https://www.dongchedi.com/usedcar). Собирает структурированные данные через Oxylabs Web Scraper API в Supabase Postgres. Заточен под отбор машин для ввоза в Казахстан (год ≥ 2022, не EV).
+
+---
+
+## Содержание
+
+1. [Архитектура](#архитектура)
+2. [Технологический стек](#технологический-стек)
+3. [Файлы парсера](#файлы-парсера)
+4. [URL-схема dongchedi (28 позиций)](#url-схема-dongchedi-28-позиций)
+5. [XHR-захват `sh_sku_list`](#xhr-захват-sh_sku_list)
+6. [Шаг 1: `collect_ids.py` — сбор ID](#шаг-1-collect_idspy--сбор-id)
+7. [Шаг 2: `scrape_dongchedi.py` — парсинг карточек](#шаг-2-scrape_dongchedipy--парсинг-карточек)
+8. [Шаг 3: `refresh_cars.py` — обновление + sold detection](#шаг-3-refresh_carspy--обновление--sold-detection)
+9. [Схема БД (Supabase)](#схема-бд-supabase)
+10. [GitHub Actions workflows](#github-actions-workflows)
+11. [Локальный запуск](#локальный-запуск)
+12. [Стоимость Oxylabs](#стоимость-oxylabs)
+13. [Brand pool](#brand-pool)
+14. [Известные проблемы и TODO](#известные-проблемы-и-todo)
 
 ---
 
 ## Архитектура
 
-Проект состоит из двух Python скриптов, работающих с одной общей SQLite базой `cars.db`:
-
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                                                              │
-│  Шаг 1:  collect_ids.py                                      │
-│          ↓                                                   │
-│          Открывает страницу-листинг dongchedi в headless     │
-│          браузере через Oxylabs, скроллит вниз чтобы         │
-│          подгрузить машины через внутренний API сайта,       │
-│          извлекает sku_id из финального HTML                 │
-│          ↓                                                   │
-│          Записывает sku_id в таблицу pending_ids             │
-│                                                              │
-│  Шаг 2:  scrape_dongchedi.py --skip-listing                  │
-│          ↓                                                   │
-│          Берёт sku_id из pending_ids, для каждого            │
-│          открывает страницу карточки через Oxylabs           │
-│          (render=html), извлекает JSON __NEXT_DATA__,        │
-│          парсит ~40 полей, переводит китайский на латиницу   │
-│          ↓                                                   │
-│          Записывает полные данные в таблицу cars             │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│ Шаг 1: collect_ids.py                                       │
+│   79 брендов × 4 города = 316 URL                           │
+│   Oxylabs открывает каждую страницу в headless-браузере,    │
+│   скроллит, перехватывает XHR /motor/pc/sh/sh_sku_list      │
+│   Фильтр car_year ≥ 2022 ДО записи в БД                     │
+│        ↓                                                    │
+│   pending_ids (Supabase) — очередь sku_id + метаданные      │
+└─────────────────────────────────────────────────────────────┘
+        ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Шаг 2: scrape_dongchedi.py                                  │
+│   Берёт sku_id из pending_ids (исключая carantine и         │
+│   уже спарсенные), параллельно (10 воркеров) открывает      │
+│   /usedcar/{id}, извлекает __NEXT_DATA__.skuDetail,         │
+│   парсит 40+ полей                                          │
+│        ↓                                                    │
+│   cars (Supabase) — главная таблица                         │
+│        ↓                                                    │
+│   при фейле: pending_ids.failed_attempts += 1               │
+│   после 3-х подряд: ID в карантине, больше не парсится      │
+└─────────────────────────────────────────────────────────────┘
+        ↓
+┌─────────────────────────────────────────────────────────────┐
+│ Шаг 3: refresh_cars.py (weekly)                             │
+│   Re-fetch всех живых машин (sold_at IS NULL),              │
+│   старейшие last_refresh_at первыми                         │
+│        ↓                                                    │
+│   успех + новая цена < старой → changes('price_drop')       │
+│   3 фейла подряд → cars.sold_at = now + changes('sold')     │
+└─────────────────────────────────────────────────────────────┘
+        ↓
+┌─────────────────────────────────────────────────────────────┐
+│ cars_kz_view — вычисляемые kz_importable / kz_status        │
+│   year ≥ 2022 AND engine_type != 'Electric' → ok            │
+└─────────────────────────────────────────────────────────────┘
 ```
-
-Файлы:
-- `collect_ids.py` — сбор sku_id с листинговой страницы dongchedi
-- `scrape_dongchedi.py` — парсинг полной карточки по sku_id
-- `cars.db` — SQLite база с таблицами `pending_ids`, `cars`, `seen_ids`
 
 ---
 
 ## Технологический стек
 
-| Компонент | Что | Зачем |
-|---|---|---|
-| **Oxylabs Web Scraper API** | Realtime endpoint `https://realtime.oxylabs.io/v1/queries` | Прокси-сервис с китайскими IP и headless-браузером. Обходит блокировки dongchedi |
-| **source: universal** | Тип job в Oxylabs API | Универсальный скрейпинг произвольных URL |
-| **geo_location: China** | Параметр Oxylabs | Запрос идёт с IP внутри Китая (Beijing) — иначе dongchedi отдаёт пустую страницу |
-| **render: html** | Параметр Oxylabs | Запускает реальный браузер (Chromium) для рендера JavaScript |
-| **browser_instructions** | Команды браузеру | Действия после загрузки (скролл, клик, ожидание) |
-| **__NEXT_DATA__** | JSON-блок в HTML карточки | Содержит все структурированные данные о машине (Next.js гидратация) |
-| **Python 3.12** | runtime | Локально на Windows |
-| **requests** | HTTP клиент | Запросы к Oxylabs |
-| **sqlite3** | стандартная библиотека Python | Локальная база |
-| **concurrent.futures.ThreadPoolExecutor** | стандартная библиотека | Параллельная обработка карточек |
+| Компонент | Что |
+|---|---|
+| Python 3.12 | runtime парсера |
+| Oxylabs Realtime API | https://realtime.oxylabs.io/v1/queries (Web Scraper, real account) |
+| Supabase Postgres | основная БД через REST API (PostgREST), без `psycopg2` |
+| SQLite | fallback для локальной разработки (одинаковая схема) |
+| GitHub Actions | runner + cron + manual workflow_dispatch |
+
+Зависимости в `requirements.txt`: одна строка `requests`.
 
 ---
 
-## Шаг 1. Сбор sku_id (collect_ids.py)
+## Файлы парсера
 
-### Что делает
-
-Открывает URL листинга dongchedi в headless-браузере Oxylabs, скроллит страницу вниз 10 раз. На каждом скролле сам сайт через свой внутренний JS-код подгружает следующую порцию объявлений (lazy loading). После всех скроллов забирается финальный HTML с накопленными карточками. Из HTML регуляркой извлекаются все sku_id (ссылки `/usedcar/{цифры}` где число от 7 знаков).
-
-### Ключевые параметры
-
-URL листинга:
 ```
-https://www.dongchedi.com/usedcar/x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x-x
+poisk_avto/
+├── collect_ids.py          # Шаг 1: XHR-захват, brand×city
+├── scrape_dongchedi.py     # Шаг 2: parse_card(), 40+ полей, словари переводов
+├── refresh_cars.py         # Шаг 3: re-check + sold + price drops
+├── db.py                   # Supabase REST + SQLite fallback, общий API
+├── requirements.txt        # requests
+├── README_dongchedi.md     # этот файл
+└── .github/
+    └── workflows/
+        ├── scrape.yml      # daily 19:00 UTC + manual dispatch
+        └── refresh.yml     # weekly Sun 22:00 UTC + manual dispatch
 ```
-19 позиций `x` — это места под фильтры (бренд, цена, год, кузов и т.д.). Все `x` = "без фильтра" = "все машины".
 
-Oxylabs payload:
+---
+
+## URL-схема dongchedi (28 позиций)
+
+Расшифровано **эмпирически** через анализ HTML. Листинг б/у имеет ровно 28 позиций через дефис:
+
+```
+https://www.dongchedi.com/usedcar/p0-p1-p2-...-p27
+```
+
+| Поз | Фильтр | Примеры значений |
+|---|---|---|
+| 0 | Цена (万 CNY) | `0,3`, `3,5`, `5,10`, `10,15`, `15,20`, `20,!1` |
+| 1 | Тип кузова | `0`=Sedan, `1`=SUV, `2`=MPV, `3`=Pickup, `4`=Sports |
+| 5 | Объём двигателя | `0,1.0`, `1.1,1.6`, `1.7,2.0`, `2.1,2.5` |
+| 6 | Топливо | `1`=Бензин, `2`=Дизель, `3`=Гибрид, `4-6`=NEV |
+| 12 | КПП | числовые коды |
+| 16 | Пробег (万 km) | `0,1`, `1,3`, `3,5`, `5,10`, `10,!1` |
+| 18 | Привод | `1`=FWD, `2`=RWD, `3`=AWD |
+| **19** | **Brand ID** | См. [Brand pool](#brand-pool) |
+| **21** | **City code** | См. ниже |
+| 22 | Режим выдачи | 1-4 |
+
+Все остальные позиции — `x` = "без фильтра".
+
+**City codes** (проверены):
+
 ```python
-{
+"beijing":   "110000"
+"shanghai":  "310000"
+"guangzhou": "440100"
+"shenzhen":  "440300"
+"tianjin":   "120000"
+"all":       "x"
+```
+
+**Важно:** в URL **нет фильтра по году выпуска**. `车龄` означает не год, а возраст. Год отдаётся в XHR-ответе (`car_year`) и фильтруется в Python (`--min-year`).
+
+---
+
+## XHR-захват `sh_sku_list`
+
+Dongchedi — Next.js SSR. Данные карточек в HTML через `<script id="__NEXT_DATA__">`. Но **листинг машин** подгружается через защищённый `msToken` API `/motor/pc/sh/sh_sku_list` (POST). Напрямую дёрнуть нельзя.
+
+**Решение:** Oxylabs параметр `"xhr": true` ловит все XHR-вызовы, которые browser делает на странице. Мы вытаскиваем ответы `sh_sku_list` — это чистый JSON со списком ~20 машин на каждый вызов.
+
+```python
+payload = {
     "source": "universal",
-    "url": LISTING_URL,
-    "geo_location": "China",
+    "url": "https://www.dongchedi.com/usedcar/x-...-110000-x-...",
+    "geo_location": "China",       # обязательно
     "locale": "zh-CN",
     "render": "html",
+    "xhr": True,                   # ← ключевое
     "browser_instructions": [
-        {"type": "scroll_to_bottom", "wait_time_s": 2},
-        ...   # 10 раз
-    ]
+        {"type": "scroll_to_bottom", "wait_time_s": 2}
+    ] * 8,
 }
 ```
 
-`scroll_to_bottom` с `wait_time_s: 2` — скролл в самый низ + пауза 2 сек, чтобы успел отработать lazy-load. 10 скроллов даёт ~70 машин за один прогон (лимит времени Oxylabs ~120 сек на job с render+instructions).
+При 8 скроллах — ~11 POST-вызовов `sh_sku_list` ≈ 220 машин в JSON с метаданными:
+- `sku_id`, `car_year`, `brand_id`, `brand_name`, `series_name`
+- `car_source_city_name`, `transfer_cnt`, `shop_id`
 
-### Регулярка извлечения sku_id
-
-```python
-CARD_LINK_RE = re.compile(r'/usedcar/(\d{7,})')
-```
-
-7+ цифр — это минимум для реальных ID объявлений. Короче — навигационные ссылки (`/usedcar/5`, `/usedcar/0`).
-
-### Запуск
-
-```powershell
-$env:OXY_USER="ВАШ_USER"
-$env:OXY_PASS="ВАШ_PASS"
-
-python collect_ids.py --limit 1000 --scrolls 10
-```
-
-Один запуск возвращает ~70-80 уникальных ID. Повторные запуски докидывают в `pending_ids` новые ID которых ещё не было (dongchedi отдаёт разный порядок при каждом обращении).
-
-### Стоимость
-
-Один запуск листинга с render+browser_instructions = ~$0.03-0.05 в Oxylabs. Собрать 1000 ID = ~$0.50-1.00 (15 прогонов).
+**Не приходит в листинге:** `sh_price` (цена) и `official_price`. Они только в карточке через `__NEXT_DATA__.skuDetail`.
 
 ---
 
-## Шаг 2. Парсинг карточек (scrape_dongchedi.py)
+## Шаг 1: `collect_ids.py` — сбор ID
 
-### Что делает
+**Что делает.** Для каждой комбинации `(город, бренд)` отправляет один Oxylabs-запрос, перехватывает все XHR `sh_sku_list`, собирает уникальные `sku_id`. Фильтрует машины старше `--min-year` ДО записи (экономит парсинг карточек).
 
-Для каждого sku_id из таблицы `pending_ids` (или из листинга если запущено без `--skip-listing`):
-1. Открывает URL карточки `https://www.dongchedi.com/usedcar/{sku_id}` в headless-браузере Oxylabs
-2. Из готового HTML извлекает JSON-блок `<script id="__NEXT_DATA__">`
-3. Из JSON парсит все поля, переводит китайский на латиницу через словари
-4. Сохраняет в таблицу `cars`
+**Стратегия brand × city.** Без фильтра по бренду листинг показывает только топ-220 машин по стране. С фильтром по бренду — топ-220 *внутри бренда*. 79 × 4 = 316 URL ≈ 800–1500 новых машин за прогон.
 
-### Структура __NEXT_DATA__
-
-Все данные карточки лежат в `props.pageProps.skuDetail`:
+**Параметры:**
 
 ```
-skuDetail
-├── car_info
-│   ├── brand_name              → mark_cn ("奔驰")
-│   ├── series_name             → series_cn ("奔驰GLA")
-│   ├── car_name                → используется в model
-│   ├── year                    → year (2017)
-│   ├── body_color              → color_cn
-│   ├── mileage                 → km_age (после парсинга "8.20万公里")
-│   ├── series_type             → body_type (код 0-8)
-│   └── series_new_energy_type  → engine_type (код 0-4)
-│
-├── source_sh_price             → price_cny (делим на 100: фынь → CNY)
-├── source_offical_price        → new_price_cny
-│
-├── car_config_overview
-│   ├── power
-│   │   ├── acceleration_time     → acceleration_time ("8.5s")
-│   │   ├── capacity              → displacement ("1.6T")
-│   │   ├── fuel_form             → fuel_cn ("汽油")
-│   │   ├── gearbox_description   → transmission_cn ("7挡双离合")
-│   │   └── horsepower            → horse_power ("156马力" → 156)
-│   ├── manipulation.driver_form  → drive_cn ("前置前驱" → FWD)
-│   └── space                     → length_mm/width_mm/height_mm/wheelbase_mm
-│
-├── other_params (массив name/value)
-│   ├── 上牌地       → reg_city_cn (где зарегистрировано)
-│   ├── 车源地       → city_cn (источник)
-│   ├── 过户次数     → owners_count
-│   ├── 上牌时间     → reg_date ("2017年08月" → "2017-08-01")
-│   ├── 排量         → displacement (резервный источник)
-│   ├── 变速箱       → transmission_cn (резервный)
-│   ├── 车身颜色     → color_cn (резервный)
-│   ├── 内饰颜色     → interior_color_cn
-│   └── 保养方式     → maintenance
-│
-├── head_images (до 30 URL фото)  → images, image_count
-├── sh_car_desc                   → description
-└── shop_info
-    ├── shop_name                 → shop_name
-    ├── shop_short_name           → shop_short_name
-    ├── shop_address              → shop_address
-    ├── city_name                 → city_cn (резервный)
-    ├── shop_id                   → shop_id
-    ├── sales_car_num             → shop_cars_count
-    └── shop_type                 → seller_type ("Dealer" / "Private")
+--cities       beijing,shanghai,guangzhou,shenzhen   # CSV из CITY_CODES
+--brands       all                                    # 'all' или CSV из BRAND_POOL
+--scrolls      8                                      # скроллов на запрос
+--batch-size   4                                      # параллельных запросов
+--batch-pause  3                                      # сек между batch'ами
+--min-year     2022                                   # отсекаем старые
+--limit        10000                                  # макс новых ID за прогон
 ```
 
-### Переводы китайский → латиница
+**Output:** записи в `pending_ids` с `metadata` (car_year, brand_name, series_name, city и т.д.).
 
-Применяются через словари в коде:
-
-- **BRAND_MAP** (~120 брендов): 奔驰→Mercedes-Benz, 宝马→BMW, 比亚迪→BYD, 蔚来→NIO, 理想→Li Auto, 小米→Xiaomi, 领克→Lynk & Co, 红旗→Hongqi, 荣威→Roewe, 极氪→Zeekr, 智己→IM Motors, 深蓝→Deepal, 哪吒→Neta, 问界→AITO и т.д.
-- **COLOR_MAP**: 白色→White, 黑色→Black, 银色→Silver, 灰色→Gray, 蓝色→Blue, 红色→Red, 棕色→Brown, 香槟色→Champagne и т.д.
-- **FUEL_MAP**: 汽油→Petrol, 柴油→Diesel, 纯电→Electric, 油电混合→Hybrid, 插电混动→PHEV, 增程式→EREV
-- **TRANSMISSION_MAP**: 手动→Manual, 自动→Automatic, 无级变速→CVT, 双离合→DCT
-- **DRIVE_MAP**: 前置前驱→FWD, 前置后驱→RWD, 全时四驱→AWD, 适时四驱→AWD
-- **BODY_MAP** (резервный): 轿车→Sedan, SUV→SUV, MPV→Minivan, 跑车→Sports Car, 皮卡→Pickup и т.д.
-
-Для body_type приоритет — числовой код `series_type` в JSON (0=Sedan, 1=SUV, 2=Minivan, 3=Pickup, 4=Sports Car, 6=Light Commercial, 7=Microvan, 8=Mini Truck). Если код не задан — fallback на анализ series_name (содержит "SUV", "越野", "MPV").
-
-### Парсеры значений
-
-```python
-parse_wan("8.20万公里")     → 82000.0      # "万" = 10000
-parse_reg_date("2017年08月") → "2017-08-01"
-parse_horse_power("156马力") → 156
-parse_displacement("1.6T")   → 1.6         # парсит "1.6T" и "2.0L"
-parse_owners("4次")          → 4
-```
-
-Цены: dongchedi возвращает в JSON `source_sh_price: 5880000` — это **фынь** (1/100 юаня). Делим на 100 → 58800 CNY.
-
-### Запуск
-
-```powershell
-# Если уже есть sku_id в pending_ids (после collect_ids.py):
-python scrape_dongchedi.py --skip-listing --limit 1000 --workers 5
-
-# Или быстрый прогон без collect_ids (берёт IDs прямо с первой страницы листинга, ~60 машин):
-python scrape_dongchedi.py --cities bj --limit 60 --workers 5
-```
-
-### Параллелизм
-
-`--workers 5` запускает 5 потоков параллельно. Oxylabs выдерживает 10+ параллельных запросов на один аккаунт. Производительность: ~50 машин за 5 минут, ~600 машин в час.
-
-### Стоимость
-
-Каждая карточка = 1 рендер через Oxylabs = ~$0.002. **1000 машин ≈ $2.**
-
-### Результат проверенного прогона
-
-Тестовый прогон на 50 машинах:
-- 48 OK / 2 FAIL = **96% успех**
-- Спарсенные бренды: BMW, Mercedes-Benz, Audi, Toyota, Ford, Volkswagen, Roewe, Hyundai, Lynk & Co, BYD, Porsche, Honda, Nissan, Buick, Volvo, Kia, Chevrolet, Cadillac, Smart, Hongqi, Land Rover, Changan, Lincoln, Haval
-- Все поля заполнены корректно: цены в юанях, пробег в км, габариты, фото (15-30 шт на машину), описание
+**Throttling.** Oxylabs при 4+ параллельных запросах рандомно режет 1–2 за batch — это нормально, retry в коде нет. Если *всегда* один город возвращает 0 — снижай `--batch-size` до 2.
 
 ---
 
-## База данных (cars.db)
+## Шаг 2: `scrape_dongchedi.py` — парсинг карточек
 
-### Таблица pending_ids
+**Что делает.** Берёт ID из `pending_ids` (исключая уже в `cars` и quarantine с `failed_attempts >= 3`), параллельно через `ThreadPoolExecutor` открывает `/usedcar/{id}` через Oxylabs `render=html`, извлекает `__NEXT_DATA__.props.pageProps.skuDetail`, заполняет 40+ полей.
 
-Очередь sku_id для обработки. Заполняется `collect_ids.py`, читается `scrape_dongchedi.py --skip-listing`.
+**Параметры:**
 
-| Поле | Тип | Описание |
+```
+--skip-listing                  # обязательный флаг (без него скрипт упадёт)
+--limit         2000            # макс карточек за прогон
+--workers       10              # параллелизм
+```
+
+**Quarantine.** При любом фейле (HTTP non-200, отсутствие `__NEXT_DATA__`, отсутствие `skuDetail`) инкрементим `pending_ids.failed_attempts`. После 3-х подряд ID в карантине — больше не выдаётся `get_pending_ids()`. Раньше каждый прогон тратился запрос на одни и те же мёртвые ID (0.5% базы).
+
+**Парсимые поля:**
+
+| Группа | Поля |
+|---|---|
+| Идентификация | source, source_id, source_language, url, title, spu_id |
+| Бренд/модель | mark_original, mark, series_original, model, complectation, year |
+| Цена | price_original, price_currency (CNY), new_price_original, new_price_currency |
+| Пробег | km_age_original, km_age_unit (km), km_age |
+| Цвет/тип | color_original, color, body_type, engine_type |
+| Двигатель | fuel_original, displacement, horse_power, acceleration_time |
+| Трансмиссия | transmission_original, transmission_type, drive_original, drive_type |
+| Размеры | length_mm, width_mm, height_mm, wheelbase_mm |
+| Локация | city_original, city, reg_city_original, reg_city, reg_date |
+| Прочее | owners_count, maintenance, interior_color_original, description |
+| Фото | images (JSONB array), image_count |
+| Диллер | seller_type, shop_name, shop_short_name, shop_address, shop_id, shop_cars_count, sales_range |
+| Lifecycle | first_seen, last_seen, sold_at, refresh_failed_attempts, last_refresh_at |
+| Резерв | source_data (JSONB) — под inspection report, опции и т.п. |
+
+**Цена.** Хранится в оригинальной валюте (CNY) без конвертации. Фронт сам считает по live FX rate. `sh_price` и `official_price` приходят в *фэнях* (1/100 CNY) — делим на 100.
+
+**Словари переводов.** В коде: `BRAND_MAP`, `COLOR_MAP`, `FUEL_MAP`, `TRANSMISSION_MAP`, `DRIVE_MAP`, `CITY_MAP`. Когда будет второй парсер (che168) — выносить общее в `parsers/common.py`.
+
+**Fallbacks (улучшения 2026-05).**
+
+- **`body_type`** при отсутствии `series_type`: распознаём по series_name и car_name — Range Rover (`揽胜/极光`), Defender (`卫士`), Discovery (`发现`), Land Cruiser/Prado, Wrangler, Grand Cherokee, Highlander, VW Tiguan/Touareg/Teramont, BMW X1-X7, Audi Q3-Q8, Mercedes GLA-GLS; MPV (GL8, Sienna, Odyssey, Vellfire, Alphard); пикапы (`皮卡`); купе (`轿跑/coupe`).
+- **`drive_type`**: помимо `前置前驱/前置后驱/全时四驱` добавлены `前置四驱/中置四驱/后置四驱` и EV multi-motor (`双/三/四电机四驱`).
+- **`engine_type`** при пустом или `-` значении: парсим `model` — `PHEV/插电` → PHEV, `增程` → EREV, `HEV/混动/油电` → Hybrid, `EV/纯电` → Electric, `TSI/TFSI/Turbo` → Petrol.
+
+---
+
+## Шаг 3: `refresh_cars.py` — обновление + sold detection
+
+**Что делает.** Раз в неделю (или вручную) проходит по всем живым машинам (`sold_at IS NULL`), сортируя по `last_refresh_at ASC NULLS FIRST` (давно не проверенные — первыми). Для каждой:
+
+1. Re-fetch карточки через Oxylabs.
+2. **Успех:**
+   - Если `new price < old price` → пишем строку в `changes(change_type='price_drop')` с `{price_original}` старым и новым.
+   - `upsert_car(rec)` — обновляет все актуальные поля (цена, last_seen и т.д.).
+   - `last_refresh_at = now`, `refresh_failed_attempts = 0`.
+3. **Фейл** (нет HTML, нет `__NEXT_DATA__`, нет `skuDetail`):
+   - `refresh_failed_attempts += 1`.
+   - Если стало `>= 3` → `sold_at = now` + строка `changes(change_type='sold')` с `{last_price, consecutive_fails}` и `{sold_at}`.
+
+**Параметры:**
+
+```
+--limit     500          # сколько машин за прогон
+--all                    # все живые (игнорирует --limit)
+--workers   10
+--dry-run                # не писать в БД, только показать что бы сделали
+```
+
+**Порог 3** настраивается в `db.py:SOLD_FAIL_THRESHOLD`. Quarantine pending_ids — `QUARANTINE_THRESHOLD = 3` там же.
+
+---
+
+## Схема БД (Supabase)
+
+Проект: `pdmbdclhqiqyoomeswxs.supabase.co`.
+
+### `cars`
+
+Универсальная multi-source таблица. Главные поля:
+
+| Поле | Тип | Назначение |
 |---|---|---|
-| sku_id | TEXT PK | ID объявления на dongchedi |
-| brand_name, series_name, car_name | TEXT | Из listing API (если успели подтянуть) |
-| car_year | INTEGER | Год выпуска |
-| car_source_city_name | TEXT | Город-источник |
-| sh_city_name | TEXT | Город фильтра |
-| shop_id | TEXT | ID магазина |
-| transfer_cnt | INTEGER | Кол-во передач |
-| found_at | TEXT | ISO timestamp когда нашли |
+| `id` | bigserial PK | автоинкремент |
+| `source` + `source_id` | text, UNIQUE | составной ключ (`dongchedi` + sku_id) |
+| `source_language` | text | `zh` / `ko` / `ja` для языка `*_original` |
+| `*_original` | text | значения на языке источника (mark, color, city, ...) |
+| `*` (без суффикса) | text | нормализовано в латиницу |
+| `price_original` + `price_currency` | numeric, text | без конвертации — фронт делает |
+| `km_age_original` + `km_age_unit` + `km_age` | numeric, text, numeric | km нормализован для cross-market фильтров |
+| `images` | jsonb | массив URL |
+| `source_data` | jsonb | источник-специфичные поля (inspection report и т.п.) |
+| `first_seen`, `last_seen` | timestamptz | дата первого/последнего успешного парсинга |
+| `sold_at` | timestamptz | null если живая |
+| `refresh_failed_attempts` | int | счётчик подряд фейлов при refresh |
+| `last_refresh_at` | timestamptz | последний успешный re-check |
 
-### Таблица cars
+Индексы: `idx_cars_alive` (partial WHERE sold_at IS NULL), `idx_cars_last_refresh`.
 
-Главная таблица с полными данными по машинам. PK: `inner_id` (= sku_id).
-
-```sql
-CREATE TABLE cars (
-    inner_id TEXT PRIMARY KEY,           -- ID карточки на dongchedi
-    url TEXT,                            -- https://www.dongchedi.com/usedcar/{id}
-    title TEXT,                          -- Полный заголовок объявления
-    mark_cn TEXT, mark TEXT,             -- Бренд (китайский / латиница)
-    series_cn TEXT,                      -- Серия (китайский)
-    model TEXT,                          -- Полное название "奔驰GLA GLA 200 动感型"
-    complectation TEXT,                  -- Только trim "GLA 200 动感型"
-    year INTEGER,                        -- Год выпуска
-    price_cny REAL,                      -- Цена в юанях (число)
-    new_price_cny REAL,                  -- Цена нового авто в юанях
-    km_age REAL,                         -- Пробег в км (число)
-    color_cn TEXT, color TEXT,           -- Цвет кузова
-    body_type TEXT,                      -- Sedan / SUV / Minivan / Pickup / ...
-    engine_type TEXT, fuel_cn TEXT,      -- Petrol / Electric / Hybrid / PHEV / EREV
-    transmission_cn TEXT,                -- КПП (китайский, полное)
-    transmission_type TEXT,              -- Manual / Automatic / CVT / DCT
-    drive_cn TEXT, drive_type TEXT,      -- FWD / RWD / AWD
-    displacement REAL,                   -- Объём двигателя (литры, например 1.6)
-    horse_power INTEGER,                 -- Мощность в л.с.
-    acceleration_time TEXT,              -- Разгон 0-100 ("8.5s")
-    length_mm INTEGER,                   -- Длина в мм
-    width_mm INTEGER,                    -- Ширина в мм
-    height_mm INTEGER,                   -- Высота в мм
-    wheelbase_mm INTEGER,                -- Колёсная база в мм
-    city_cn TEXT,                        -- Город (китайский)
-    reg_city_cn TEXT,                    -- Город регистрации
-    reg_date TEXT,                       -- Дата регистрации (YYYY-MM-DD)
-    owners_count INTEGER,                -- Кол-во владельцев
-    maintenance TEXT,                    -- Способ обслуживания
-    interior_color_cn TEXT,              -- Цвет салона
-    description TEXT,                    -- Описание продавца
-    images TEXT,                         -- JSON-массив URL фото
-    image_count INTEGER,                 -- Кол-во фото
-    seller_type TEXT,                    -- Dealer / Private
-    shop_name TEXT,                      -- Полное название салона
-    shop_short_name TEXT,                -- Короткое название
-    shop_address TEXT,                   -- Физический адрес
-    shop_id TEXT,                        -- ID салона
-    shop_cars_count INTEGER,             -- Сколько машин у этого дилера
-    sales_range TEXT,                    -- Радиус продаж
-    spu_id TEXT,                         -- SPU ID (родительский)
-    first_seen TEXT,                     -- Когда впервые увидели
-    last_seen TEXT                       -- Когда обновили последний раз
-);
-
-CREATE INDEX idx_mark ON cars(mark);
-CREATE INDEX idx_year ON cars(year);
-CREATE INDEX idx_price ON cars(price_cny);
-CREATE INDEX idx_city ON cars(city_cn);
-```
-
-### Таблица seen_ids
-
-Лог всех id которые мы уже спарсили в cars. Используется чтобы не парсить одно и то же повторно.
+### `pending_ids`
 
 ```sql
-CREATE TABLE seen_ids (
-    inner_id TEXT PRIMARY KEY,
-    first_seen TEXT
-);
+source TEXT, source_id TEXT, metadata JSONB,
+found_at TIMESTAMPTZ,
+failed_attempts INT NOT NULL DEFAULT 0,
+last_failed_at TIMESTAMPTZ,
+PRIMARY KEY (source, source_id)
 ```
 
-### Resume
+`metadata` — снапшот из XHR-collect: car_year, brand_name, series_name, city. Используется в коллекторе для фильтра по году до парсинга карточек.
 
-Скрипты **resume-friendly**:
-- `collect_ids.py` — добавляет в `pending_ids` через INSERT OR REPLACE, не дублирует
-- `scrape_dongchedi.py` — для обновления используется `INSERT ... ON CONFLICT DO UPDATE` по PK `inner_id`. Уже обработанные ID берутся из `seen_ids`, новые из `pending_ids \ seen_ids`. Можно прерывать Ctrl+C и запускать заново — продолжит с того же места.
+Индекс `idx_pending_ids_quarantine` для быстрого пропуска квартанированных.
+
+### `changes`
+
+```sql
+id BIGSERIAL PK,
+source TEXT, source_id TEXT,
+change_type TEXT,           -- 'price_drop' | 'sold' | (будущие: 'km_age', 'images')
+old_value JSONB, new_value JSONB,
+created_at TIMESTAMPTZ
+```
+
+Лента событий для фронта. Сейчас пишутся:
+
+| change_type | когда | old_value | new_value |
+|---|---|---|---|
+| `price_drop` | refresh нашёл цену ниже | `{price_original, price_currency}` | то же, новое |
+| `sold` | 3 фейла подряд при refresh | `{last_price, price_currency, consecutive_fails}` | `{sold_at}` |
+
+Подорожание **не** логируется намеренно (редко бывает у б/у; цена в `cars` всё равно обновится через upsert).
+
+### View `cars_kz_view`
+
+Добавляет вычисляемые поля поверх `cars`:
+
+- `age_years` — `EXTRACT(YEAR FROM CURRENT_DATE) - year`
+- `evro_class` — 3/4/5/6 по году
+- `kz_importable` — `year >= 2022 AND engine_type != 'Electric'`
+- `kz_status` — `ok` / `older_than_2022` / `ev_no_subsidy_2026` / `unknown_year`
+
+Если правила КЗ изменятся — пересоздавать view, данные в `cars` не трогать.
+
+### RLS
+
+**Сейчас отключён** на всех таблицах (`cars`, `pending_ids`, `changes`). Намеренно пока нет публичного фронта. Когда подключим anon-доступ — включить и написать политики.
 
 ---
 
-## Что собирается (поля)
+## GitHub Actions workflows
 
-Сравнение с auto-api.com/dongchedi (конкурент):
+### `scrape.yml` — Daily Discover + Scrape
 
-| Поле | auto-api | наш парсер |
+**Триггеры:**
+- `schedule: 0 19 * * *` — каждый день в 19:00 UTC = 03:00 Пекин
+- `workflow_dispatch` — вручную с 9 параметрами (cities, brands, scrolls, batch_size, batch_pause, min_year, collect_limit, scrape_limit, workers)
+
+**Шаги:**
+1. Setup Python 3.12 + `pip install -r requirements.txt`
+2. `python collect_ids.py …` — собрать новые ID
+3. `python scrape_dongchedi.py --skip-listing …` — спарсить карточки
+
+**Timeout:** 350 минут (полный прогон 25–35 мин для collect + 30–60 мин для scrape).
+
+### `refresh.yml` — Weekly Re-check
+
+**Триггеры:**
+- `schedule: 0 22 * * 0` — каждое воскресенье 22:00 UTC = 06:00 Пекин понедельник
+- `workflow_dispatch` — вручную: `limit` (или `all=true`), `workers`
+
+**Шаг:** `python refresh_cars.py --all --workers 10`. Cron всегда делает full refresh; manual может ограничить `--limit`.
+
+### Secrets
+
+| Имя | Содержимое |
+|---|---|
+| `OXY_USER` | Oxylabs username |
+| `OXY_PASS` | Oxylabs password |
+| `SUPABASE_URL` | https://pdmbdclhqiqyoomeswxs.supabase.co |
+| `SUPABASE_KEY` | **service_role** JWT (не anon!) |
+
+⚠️ Имя `SUPABASE_KEY` важное (не `SUPABASE_SERVICE_KEY` как в некоторых старых черновиках) — внутри service_role.
+
+---
+
+## Локальный запуск
+
+```bash
+# Переменные окружения
+export OXY_USER="..."
+export OXY_PASS="..."
+export SUPABASE_URL="https://pdmbdclhqiqyoomeswxs.supabase.co"
+export SUPABASE_KEY="..."     # service_role
+
+# Шаг 1: собрать ID (10–35 мин)
+python collect_ids.py --cities beijing,shanghai,guangzhou,shenzhen \
+    --brands all --scrolls 8 --batch-size 4 --batch-pause 3 \
+    --min-year 2022 --limit 10000
+
+# Шаг 2: спарсить карточки (~3 мин на 100 карточек)
+python scrape_dongchedi.py --skip-listing --limit 2000 --workers 10
+
+# Шаг 3: refresh (только если нужно проверить старые)
+python refresh_cars.py --limit 100 --workers 10
+
+# Dry-run refresh — посмотреть что бы изменилось без записи
+python refresh_cars.py --limit 50 --dry-run
+```
+
+Если `SUPABASE_URL`/`SUPABASE_KEY` не заданы — `db.py` автоматически свалится в SQLite `cars.db` (схема та же).
+
+---
+
+## Стоимость Oxylabs
+
+| Тип запроса | Цена |
+|---|---|
+| Без `render` | $0.002 |
+| `render=html` | $0.003 |
+| `render=html + browser_instructions` | $0.04 |
+| `render=html + xhr + scrolls` | ~$0.04 |
+
+Один полный daily прогон:
+- collect: 316 URL × $0.04 ≈ **$12.6**
+- scrape: ~800 новых карточек × $0.04 ≈ **$32**
+- **Итого ~$45/день** (пик), после стабилизации база ~$15–20/день
+
+Weekly refresh: 1390 × $0.04 ≈ **$55/неделя**.
+
+Бюджет: **~$200–250/месяц на Oxylabs**. Если дорого — резать кол-во городов или брендов в daily collect.
+
+---
+
+## Brand pool
+
+В `collect_ids.py:BRAND_POOL` — 80 брендов, ID и названия. Группы:
+
+| Группа | Кол-во | Примеры |
 |---|---|---|
-| mark, model, complectation | да | да |
-| year, price_cny | да | да |
-| **new_price_cny** (цена нового) | нет | **да** |
-| km_age | да | да |
-| color, body_type, engine_type | да | да |
-| transmission_type, drive_type | да | да |
-| displacement, horse_power | да | да |
-| **acceleration_time** | нет | **да** |
-| **габариты (length/width/height/wheelbase)** | нет | **да** |
-| city, reg_city, reg_date | да | да |
-| owners_count | да | да |
-| description | да | да |
-| images[] | да | да |
-| seller_type, shop_name | да | да |
-| **shop_address** (адрес салона) | нет | **да** |
-| **shop_cars_count** (кол-во машин у дилера) | нет | **да** |
-| VIN | да (если есть) | нет (на dongchedi публично нет) |
-| equipment[] | да | пока нет |
-| inspection report | нет | в JSON есть, парсинг отложен |
+| Premium Euro | 10 | Mercedes, BMW, Audi, Porsche, Volvo, Land Rover, Lexus, Cadillac, Bentley, Maybach |
+| Sport / Luxury | 5 | Ferrari, Rolls-Royce, Aston Martin, Lamborghini, McLaren |
+| Mainstream foreign | 12 | VW, Toyota, Honda, Nissan, Ford, Buick, Hyundai, Kia, Tesla, Chevrolet, Jeep, Lincoln |
+| Niche foreign | 8 | MINI, smart, Skoda, Mazda, Subaru, Infiniti, Genesis, Peugeot |
+| Chinese majors | 12 | BYD, Geely, Chery, Haval, Changan, Roewe, Hongqi, GAC Trumpchi, Lynk&Co, Tank, Great Wall, WEY |
+| Chinese EV / NEV | 13 | NIO, XPeng, Li Auto, Xiaomi, AITO, Zeekr, Aion, Leapmotor, Denza, Voyah, Deepal, IM Motors, AVATR |
+| Chinese sub-brands | 17 | Changan Qiyuan, Geely Galaxy, Jetour, Exeed, Baojun, Bestune, Geometry, ORA, Arcfox, Radar, Fang Cheng Bao, YangWang, GAC Hyper, Dongfeng eP, Jetta, BAIC, BAIC Off-road |
+| Italian + Suzuki | 2 | Maserati, Suzuki |
+
+Полный список 642 брендов dongchedi доступен в их каталоге (можно скачать через тот же XHR — пока не используется).
 
 ---
 
-## Запуск с нуля
+## Известные проблемы и TODO
 
-### 1. Установка
+### Качество данных
+- **`body_type` иногда пустой** для редких моделей. Fallback расширен (Range Rover, Defender, BMW X, Audi Q, MB GL*, MPV, пикапы, купе), но для совсем экзотики (Bugatti, Koenigsegg) всё ещё может быть пусто.
+- **`engine_type = "-"`** обработано: fallback из `model` (Petrol/PHEV/EREV/Hybrid/Electric).
+- **Метаданные из XHR не используются в карточке.** В `pending_ids.metadata` лежат `car_year`, `brand_name` из XHR — парсер карточки получает то же из `__NEXT_DATA__`. Можно использовать metadata как fallback если карточка вернула пусто (низкий приоритет).
 
-```powershell
-cd C:\Users\Omen\Documents\trae_projects\china-car
-python -m pip install requests
-```
+### Скорость / стоимость
+- **Beijing/Shenzhen иногда возвращают 0** в collect — Oxylabs throttle при 4+ параллельных. Если повторяется — снизить `--batch-size` до 2 (~+20% времени, та же стоимость).
+- **Daily collect = $12.6** — самая дорогая часть. Можно сократить до 2 городов (≈ $6) если найдём что они покрывают большинство.
 
-### 2. Credentials Oxylabs
+### Расширение
+- **VIN** у dongchedi нет в публичных полях → второй парсер **che168.com** (есть VIN, тот же brand×city подход).
+- **Inspection report** dongchedi имеет, но мы не парсим — поле `cars.source_data` (JSONB) под это заложено.
+- **Больше городов** — сейчас 4 топ-города, в БД 97 уникальных. Расширить до Chengdu/Hangzhou/Chongqing/Wuhan.
 
-В PowerShell перед запуском:
-```powershell
-$env:OXY_USER="ваш_user"
-$env:OXY_PASS="ваш_password"
-```
-
-Эти переменные действуют только в текущей сессии PowerShell. Чтобы прописать постоянно — добавить через `[Environment]::SetEnvironmentVariable(...)`.
-
-### 3. Полный pipeline для 1000 машин
-
-```powershell
-# Прогон 1: собираем ID. ~70 машин за один вызов, нужно ~15 запусков для 1000.
-for ($i=1; $i -le 15; $i++) {
-    python collect_ids.py --limit 1000 --scrolls 10
-    Start-Sleep -Seconds 5
-}
-
-# Прогон 2: парсим карточки. Все ID из pending_ids которых ещё нет в cars.
-python scrape_dongchedi.py --skip-listing --limit 1000 --workers 5
-```
-
-Время прогона: сбор IDs ~30 минут, парсинг 1000 карточек ~2 часа на workers=5.
-
-Итоговая стоимость 1000 машин: ~$0.50 (IDs) + ~$2 (карточки) = **~$2.50**.
-
-### 4. Просмотр результата
-
-```powershell
-python -c "import sqlite3; c=sqlite3.connect('cars.db'); rows=c.execute('SELECT mark, model, year, price_cny, km_age, city_cn FROM cars LIMIT 20').fetchall(); [print(r) for r in rows]"
-```
-
-Открыть `cars.db` в **DB Browser for SQLite** (https://sqlitebrowser.org/) для GUI-просмотра.
-
-### 5. Экспорт в CSV / Excel
-
-```powershell
-python -c "import sqlite3, pandas as pd; c=sqlite3.connect('cars.db'); pd.read_sql('SELECT * FROM cars', c).to_csv('cars.csv', index=False, encoding='utf-8-sig')"
-```
-
-(если нужен pandas: `python -m pip install pandas`)
-
-### 6. Daily refresh
-
-Просто запустить тот же `scrape_dongchedi.py --skip-listing` повторно — это обновит `last_seen` у виденных машин. Новые объявления подберутся через повторный `collect_ids.py`.
-
-SQL для отчётов:
-```sql
--- Новые объявления за сутки
-SELECT * FROM cars WHERE first_seen > datetime('now', '-1 day');
-
--- Возможно удалённые (не виделись 3+ дня)
-SELECT * FROM cars WHERE last_seen < datetime('now', '-3 days');
-```
+### Не работает (проверено и отбросили)
+- ❌ Прямой POST к `/motor/pc/sh/sh_sku_list` — защищено `msToken`.
+- ❌ `?page=N` в URL листинга — игнорируется.
+- ❌ `geo_location="Beijing"` в Oxylabs — поддерживает только `"China"`.
+- ❌ Bright Data, Firecrawl — не подошли.
 
 ---
 
-## Ограничения
+## История критических открытий
 
-1. **VIN отсутствует.** Dongchedi не публикует VIN на сайте — это ограничение источника, а не парсера.
-
-2. **scroll_to_bottom грузит ~70 машин за один прогон.** Oxylabs ограничивает время выполнения headless-job ~120 секундами. Чтобы получить много уникальных машин — нужно запускать `collect_ids.py` повторно (порядок выдачи у dongchedi не детерминированный, каждый раз приходят слегка разные машины).
-
-3. **geo_location=China даёт пекинский IP.** Соответственно листинг возвращает машины из Beijing. Для других городов нужно либо вшить фильтр города в URL (требует дополнительного исследования позиций `x`), либо использовать `geo_location=Shanghai/Guangzhou/Shenzhen` (не проверено).
-
----
-
-## Файлы проекта
-
-```
-C:\Users\Omen\Documents\trae_projects\china-car\
-├── collect_ids.py           # Сбор sku_id
-├── scrape_dongchedi.py      # Парсинг карточек
-├── cars.db                  # SQLite база
-└── README.md                # Эта документация
-```
+1. **`__NEXT_DATA__` содержит skuDetail** — все данные карточки в одном JSON-блоке HTML.
+2. **URL имеет 28 позиций** через дефис (не 19 как было в старых черновиках).
+3. **Oxylabs `xhr: true` захватывает `sh_sku_list`** — структурированный JSON листинга без HTML-regex.
+4. **`SUPABASE_KEY` secret name** (не `SUPABASE_SERVICE_KEY`).
+5. **Brand × City стратегия** — 79 × 4 = 316 URL → ~800 новых машин за прогон вместо ~220 без фильтра по бренду.
+6. **`failed_attempts` quarantine** — 0.5% мёртвых ID больше не тратят бюджет каждый прогон.
+7. **`sold_at` via 3 consecutive fails** — детект снятых объявлений без отдельного индикатора со стороны dongchedi.

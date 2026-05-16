@@ -1,0 +1,52 @@
+name: Refresh Dongchedi (sold + price drops)
+
+on:
+  schedule:
+    # Weekly Sunday 22:00 UTC = 06:00 Beijing Monday.
+    # Full base refresh: detects sold listings and logs price drops.
+    - cron: '0 22 * * 0'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Max cars to re-check (ignored if all=true)'
+        required: false
+        default: '500'
+      all:
+        description: 'Refresh ALL alive cars'
+        required: false
+        type: boolean
+        default: true
+      workers:
+        description: 'Parallel workers'
+        required: false
+        default: '10'
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Refresh alive cars
+        env:
+          OXY_USER: ${{ secrets.OXY_USER }}
+          OXY_PASS: ${{ secrets.OXY_PASS }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          if [ "${{ inputs.all }}" = "false" ]; then
+            python refresh_cars.py \
+              --limit "${{ inputs.limit || 500 }}" \
+              --workers "${{ inputs.workers || 10 }}"
+          else
+            python refresh_cars.py --all \
+              --workers "${{ inputs.workers || 10 }}"
+          fi

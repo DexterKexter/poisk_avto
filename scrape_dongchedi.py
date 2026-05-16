@@ -170,6 +170,8 @@ DRIVE_MAP = {
     "前置前驱": "FWD", "前驱": "FWD",
     "前置后驱": "RWD", "后置后驱": "RWD", "中置后驱": "RWD", "后驱": "RWD",
     "全时四驱": "AWD", "适时四驱": "AWD", "分时四驱": "AWD", "四驱": "AWD",
+    "前置四驱": "AWD", "中置四驱": "AWD", "后置四驱": "AWD",
+    "双电机四驱": "AWD", "三电机四驱": "AWD", "四电机四驱": "AWD",
 }
 
 CITY_MAP = {
@@ -287,16 +289,43 @@ def parse_card(next_data: dict, card_id: str) -> dict | None:
     body_type_codes = {0: "Sedan", 1: "SUV", 2: "Minivan", 3: "Pickup", 4: "Sports Car",
                        6: "Light Commercial", 7: "Microvan", 8: "Mini Truck"}
     body_type = body_type_codes.get(series_type_code) if series_type_code is not None else ""
-    if not body_type and series_original:
-        sl = series_original.lower()
-        if "suv" in sl or "越野" in series_original:
+    if not body_type:
+        haystack = f"{series_original} {car_name}".lower()
+        haystack_zh = f"{series_original} {car_name}"
+        suv_markers_zh = ("越野", "揽胜", "极光", "卫士", "发现", "途", "锐", "酷",
+                          "陆", "酷威", "酷路泽", "兰德", "普拉多", "牧马人",
+                          "大切诺基", "自由光", "指南者", "霸道", "汉兰达",
+                          "途昂", "途观", "途锐", "探险者", "X1", "X3", "X5", "X7",
+                          "Q3", "Q5", "Q7", "Q8", "GLA", "GLB", "GLC", "GLE", "GLS")
+        mpv_markers_zh = ("MPV", "商务", "别克GL8", "GL8", "塞那", "赛那",
+                          "奥德赛", "艾力绅", "威尔法", "埃尔法", "传祺M")
+        pickup_markers_zh = ("皮卡", "拖卡")
+        if "suv" in haystack or any(m.lower() in haystack for m in suv_markers_zh):
             body_type = "SUV"
-        elif "mpv" in sl:
+        elif "mpv" in haystack or any(m in haystack_zh for m in mpv_markers_zh):
             body_type = "Minivan"
+        elif any(m in haystack_zh for m in pickup_markers_zh):
+            body_type = "Pickup"
+        elif "轿跑" in haystack_zh or "跑车" in haystack_zh or "coupe" in haystack:
+            body_type = "Sports Car"
 
     energy_code = car_info.get("series_new_energy_type")
     energy_codes = {0: "Petrol", 1: "Electric", 2: "PHEV", 3: "PHEV", 4: "EREV"}
     engine_type = energy_codes.get(energy_code) or tr(fuel_original, FUEL_MAP)
+    if engine_type in ("", "-", None):
+        model_str = f"{model} {gearbox_original}".upper()
+        if "PHEV" in model_str or "插电" in model:
+            engine_type = "PHEV"
+        elif "EREV" in model_str or "增程" in model:
+            engine_type = "EREV"
+        elif "HEV" in model_str or "混动" in model or "油电" in model:
+            engine_type = "Hybrid"
+        elif "EV" in model_str or "纯电" in model or "电动" in model:
+            engine_type = "Electric"
+        elif any(tag in model_str for tag in (" T ", "T-", "TSI", "TFSI", "TURBO")):
+            engine_type = "Petrol"
+        else:
+            engine_type = ""
 
     # Price: dongchedi gives fen (1/100 CNY). Store original CNY only; frontend converts.
     sh_price = sku.get("source_sh_price")
@@ -438,6 +467,7 @@ def main() -> None:
     print(f"\nScraping {len(ids)} cards with {args.workers} workers...")
     ok, fail = 0, 0
 
+    quarantined = 0
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(scrape_card, cid): cid for cid in ids}
         for i, fut in enumerate(as_completed(futures), 1):
@@ -456,12 +486,16 @@ def main() -> None:
                           f"{rec['km_age']}km {rec['city'] or rec['city_original']}")
                 else:
                     fail += 1
-                    print(f"  [{i}/{len(ids)}] id={cid} DB FAIL")
+                    DB.mark_failed(SOURCE, cid)
+                    quarantined += 1
+                    print(f"  [{i}/{len(ids)}] id={cid} DB FAIL (+1 attempt)")
             else:
                 fail += 1
-                print(f"  [{i}/{len(ids)}] id={cid} SCRAPE FAIL")
+                DB.mark_failed(SOURCE, cid)
+                quarantined += 1
+                print(f"  [{i}/{len(ids)}] id={cid} SCRAPE FAIL (+1 attempt)")
 
-    print(f"\nDone. OK: {ok}, FAIL: {fail}")
+    print(f"\nDone. OK: {ok}, FAIL: {fail} (quarantine increments: {quarantined})")
     print(f"Total in cars[{SOURCE}]: {DB.count_cars(SOURCE)}")
 
 
