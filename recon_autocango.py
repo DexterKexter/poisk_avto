@@ -28,7 +28,7 @@ OXY_URL = "https://realtime.oxylabs.io/v1/queries"
 OUT_DIR = "recon_artifacts"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-TARGET_URL = "https://www.autocango.com/usedcar"
+TARGET_URL = "https://www.autocango.com/usedcar/excludeSold=true"
 
 
 def probe(geo: str) -> dict:
