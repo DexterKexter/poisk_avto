@@ -1,17 +1,11 @@
 """
-recon_encar.py — STEP 3: dig into __NEXT_DATA__ to locate car list and fields.
+recon_encar.py — STEP 5: probe ONE detail page to find VIN and other fields.
 
-Step 2 confirmed encar is Next.js SSR with __NEXT_DATA__ in HTML.
-Now we drill into the JSON tree to find:
-  - which path holds the array of cars (likely props.pageProps.*)
-  - how many cars per page
-  - what fields each car has (looking for VIN, price, year, mileage…)
+Listing has 28 fields but no VIN. Now we fetch the detail page of a known
+car (Id from previous run) to see what extra fields are available there.
 
-Output:
-  - recon_artifacts/next_data_full.json    — full __NEXT_DATA__
-  - recon_artifacts/page_props_overview.txt — readable top-level structure
-  - recon_artifacts/car_list_sample.json   — first 3 cars from best candidate
-  - stdout: ranked list of arrays-of-objects with car-like fields
+We try fem.encar.com/cars/detail/{Id} — the modern Next.js frontend that
+the listing links to. If __NEXT_DATA__ contains car data → win.
 
 Env: OXY_USER, OXY_PASS
 """
@@ -30,58 +24,81 @@ OXY_URL = "https://realtime.oxylabs.io/v1/queries"
 OUT_DIR = "recon_artifacts"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-TARGET_URL = "https://car.encar.com/list/car"
+# Detail page of the BMW 520i we saw earlier in the listing.
+TARGET_ID = "41203231"
+TARGET_URL = f"https://fem.encar.com/cars/detail/{TARGET_ID}"
 
 NEXT_DATA_RE = re.compile(
     r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL
 )
 
-# Heuristic: a car-shaped dict typically has 2+ of these (case-insensitive).
-CAR_HINT_KEYS = {
-    "price", "year", "mileage", "model", "modelnm", "modelname",
-    "manufacturer", "manufacturernm", "make",
-    "vin", "carid", "id", "no", "vehicleid",
-    "color", "fueltype", "fuel", "transmission",
-    "image", "imagepath", "thumbnail",
+# Detail page fields we're hoping to find.
+DETAIL_HINT_KEYS = {
+    "vin", "vehicleno", "vehiclenumber", "carregisterno",
+    "price", "mileage", "year",
+    "owner", "ownerchanged", "ownerhistory",
+    "accident", "accidenthistory", "damage",
+    "option", "options", "addedoption",
+    "manufacturer", "model", "modelgroup",
+    "description", "memo", "comment",
+    "inspection", "diagnosis", "report",
 }
 
 
-def walk(node, path="$", out=None, depth=0, max_depth=12):
-    """Recursively find arrays-of-dicts. Score by car-likeness of keys."""
+def walk(node, path="$", out=None, depth=0, max_depth=15):
     if out is None:
         out = []
     if depth > max_depth:
         return out
-
-    if isinstance(node, list):
-        if node and isinstance(node[0], dict):
-            first = node[0]
-            keys = {k.lower() for k in first.keys() if isinstance(k, str)}
-            score = len(keys & CAR_HINT_KEYS)
+    if isinstance(node, dict):
+        keys = {k.lower() for k in node.keys() if isinstance(k, str)}
+        score = len(keys & DETAIL_HINT_KEYS)
+        if score >= 3:
             out.append({
                 "path": path,
-                "len": len(node),
                 "score": score,
-                "first_keys": list(first.keys()),
-                "sample_3": node[:3],
+                "keys": list(node.keys()),
+                "preview": _truncate_values(node),
             })
-        # Don't recurse into list children (avoids noise from nested arrays).
-    elif isinstance(node, dict):
         for k, v in node.items():
             walk(v, f"{path}.{k}", out, depth + 1, max_depth)
+    elif isinstance(node, list):
+        # Only walk first item of any list (assume homogeneous).
+        if node:
+            walk(node[0], f"{path}[0]", out, depth + 1, max_depth)
     return out
 
 
-def describe(value, max_str=80):
-    """One-line description of a value."""
-    if isinstance(value, list):
-        if value and isinstance(value[0], dict):
-            return f"list[{len(value)}] of dicts; first keys: {list(value[0].keys())[:10]}"
-        return f"list[{len(value)}] of {type(value[0]).__name__ if value else '?'}"
-    if isinstance(value, dict):
-        return f"dict; keys: {list(value.keys())[:12]}"
-    s = str(value)
-    return f"{type(value).__name__} = {s[:max_str]}{'...' if len(s) > max_str else ''}"
+def _truncate_values(d, max_str=100):
+    """Make dict printable: short scalar values, summarized containers."""
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, (dict, list)):
+            out[k] = f"<{type(v).__name__} {len(v)}>"
+        elif isinstance(v, str) and len(v) > max_str:
+            out[k] = v[:max_str] + "…"
+        else:
+            out[k] = v
+    return out
+
+
+def find_vin_strings(node, path="$", out=None, depth=0, max_depth=15):
+    """Find any value that looks like a VIN: 17 alphanumeric (no I, O, Q)."""
+    if out is None:
+        out = []
+    if depth > max_depth:
+        return out
+    VIN_RE = re.compile(r'^[A-HJ-NPR-Z0-9]{17}$')
+    if isinstance(node, str):
+        if VIN_RE.match(node):
+            out.append({"path": path, "value": node})
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            find_vin_strings(v, f"{path}.{k}", out, depth + 1, max_depth)
+    elif isinstance(node, list):
+        for i, v in enumerate(node[:5]):
+            find_vin_strings(v, f"{path}[{i}]", out, depth + 1, max_depth)
+    return out
 
 
 def main() -> None:
@@ -93,13 +110,10 @@ def main() -> None:
         "url": TARGET_URL,
         "geo_location": "South Korea",
         "render": "html",
-        "browser_instructions": [
-            {"type": "scroll_to_bottom", "wait_time_s": 2} for _ in range(3)
-        ],
     }
 
-    print(f"Probing {TARGET_URL}")
-    print("Fetching HTML, extracting __NEXT_DATA__, finding car list…\n")
+    print(f"Probing detail page: {TARGET_URL}")
+    print("Payload: render=html, geo=South Korea (no scrolls, no xhr)\n")
 
     r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS), json=payload, timeout=300)
     if r.status_code != 200:
@@ -108,86 +122,95 @@ def main() -> None:
     results = r.json().get("results", []) or []
     if not results:
         sys.exit("no results")
-    content = results[0].get("content")
-    if not isinstance(content, str):
-        sys.exit(f"content is {type(content).__name__}, expected string")
 
-    print(f"Got HTML: {len(content)} chars, final URL: {results[0].get('url')}\n")
+    main_result = results[0]
+    print(f"Target HTTP status: {main_result.get('status_code')}")
+    print(f"Final URL: {main_result.get('url')}\n")
+
+    content = main_result.get("content")
+    if not isinstance(content, str):
+        sys.exit(f"content is {type(content).__name__}")
+
+    print(f"HTML length: {len(content)} chars")
+
+    head_path = os.path.join(OUT_DIR, "detail_head.html")
+    with open(head_path, "w", encoding="utf-8") as f:
+        f.write(content[:16000])
+    print(f"First 16KB → {head_path}")
 
     m = NEXT_DATA_RE.search(content)
     if not m:
-        sys.exit("__NEXT_DATA__ tag NOT found")
+        print("⚠️  __NEXT_DATA__ NOT found on detail page.")
+        print("First 500 chars of HTML:")
+        print(content[:500])
+        return
+
     try:
         nd = json.loads(m.group(1))
     except Exception as e:
         sys.exit(f"__NEXT_DATA__ invalid JSON: {e}")
 
-    full_path = os.path.join(OUT_DIR, "next_data_full.json")
-    with open(full_path, "w", encoding="utf-8") as f:
+    print(f"\n✅ __NEXT_DATA__ found ({len(m.group(1))} chars)")
+    nd_path = os.path.join(OUT_DIR, "detail_next_data.json")
+    with open(nd_path, "w", encoding="utf-8") as f:
         json.dump(nd, f, ensure_ascii=False, indent=2)
-    print(f"✅ __NEXT_DATA__ saved → {full_path} ({len(m.group(1))} chars)\n")
+    print(f"   Saved → {nd_path}")
 
-    # ---------- Overview of props.pageProps ----------
-    page_props = nd.get("props", {}).get("pageProps", {})
-    print("========== props.pageProps OVERVIEW ==========")
-    print(f"pageProps top keys: {list(page_props.keys())}\n")
-    overview_lines = [f"props.pageProps keys: {list(page_props.keys())}", ""]
-    for k, v in page_props.items():
-        line = f"  {k}: {describe(v)}"
-        print(line)
-        overview_lines.append(line)
-    overview_path = os.path.join(OUT_DIR, "page_props_overview.txt")
-    with open(overview_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(overview_lines))
-    print(f"\nSaved → {overview_path}\n")
+    # ---------- props.pageProps overview ----------
+    pp = nd.get("props", {}).get("pageProps", {})
+    print(f"\n========== props.pageProps OVERVIEW ==========")
+    print(f"pageProps top keys: {list(pp.keys())}")
+    for k, v in pp.items():
+        if isinstance(v, dict):
+            print(f"  {k}: dict, keys: {list(v.keys())[:15]}")
+        elif isinstance(v, list):
+            print(f"  {k}: list[{len(v)}]")
+        else:
+            s = str(v)
+            print(f"  {k}: {type(v).__name__} = {s[:80]}")
 
-    # ---------- Find car-like arrays ----------
-    print("========== SEARCHING FOR CAR ARRAYS ==========")
-    candidates = walk(nd)
-    candidates.sort(key=lambda x: (-x["score"], -x["len"]))
+    # ---------- VIN hunt: look for 17-char strings ----------
+    print("\n========== VIN HUNT ==========")
+    vins = find_vin_strings(nd)
+    if vins:
+        for v in vins[:5]:
+            print(f"  ✅ VIN-like: {v['value']!r}  at  {v['path']}")
+    else:
+        print("  ❌ No 17-char VIN-pattern string found in __NEXT_DATA__")
 
-    print(f"Total arrays-of-dicts found: {len(candidates)}")
-    print("\nTop 10 (by car-likeness score):\n")
-    for c in candidates[:10]:
-        flag = "🎯" if c["score"] >= 3 else ("✨" if c["score"] >= 2 else "  ")
-        print(f"{flag} score={c['score']} len={c['len']:>5}  {c['path']}")
-        print(f"     keys: {c['first_keys'][:15]}")
+    # ---------- Detail-shaped dicts ----------
+    print("\n========== DETAIL-SHAPED DICTS ==========")
+    cands = walk(nd)
+    cands.sort(key=lambda x: -x["score"])
+    print(f"Found {len(cands)} dicts with 3+ detail-like fields\n")
+    for c in cands[:5]:
+        print(f"🎯 score={c['score']}  {c['path']}")
+        print(f"   keys: {c['keys'][:25]}")
+        print(f"   values: {json.dumps(c['preview'], ensure_ascii=False, indent=2)[:1500]}")
         print()
 
-    # Save top 3 candidates' samples
-    for i, c in enumerate(candidates[:3]):
-        sample_path = os.path.join(OUT_DIR, f"candidate_{i+1}_sample.json")
-        with open(sample_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "path": c["path"],
-                "total_items_at_path": c["len"],
-                "score": c["score"],
-                "first_3_items": c["sample_3"],
-            }, f, ensure_ascii=False, indent=2)
-
-    if candidates and candidates[0]["score"] >= 2:
-        winner = candidates[0]
-        # Save the best one's first item under a fixed name too
-        first_car_path = os.path.join(OUT_DIR, "best_car_sample.json")
-        with open(first_car_path, "w", encoding="utf-8") as f:
-            json.dump(winner["sample_3"][0] if winner["sample_3"] else {},
-                      f, ensure_ascii=False, indent=2)
-        print(f"\n🎯 Most likely car list: {winner['path']}")
-        print(f"   ({winner['len']} cars on this page)")
-        print(f"   Sample of 1st car → {first_car_path}")
-
-        # Also dump full first car to stdout so we don't need to open the zip.
-        if winner["sample_3"]:
-            first = winner["sample_3"][0]
-            print("\n========== FULL FIRST CAR (all fields) ==========")
-            print(f"Total fields: {len(first)}")
-            print(json.dumps(first, ensure_ascii=False, indent=2))
-            print("========== END FIRST CAR ==========\n")
-    else:
-        print("\n⚠️  No high-confidence car list found — manual inspection needed.")
+    # ---------- Dump the most likely car detail ----------
+    if cands:
+        best = cands[0]
+        print(f"\n🎯 Best candidate: {best['path']}")
+        # Save the full content of that dict (not just preview)
+        # Navigate to it
+        path_parts = re.findall(r'\.([^.\[\]]+)|\[(\d+)\]', best["path"])
+        obj = nd
+        try:
+            for key, idx in path_parts:
+                if key:
+                    obj = obj[key]
+                else:
+                    obj = obj[int(idx)]
+            best_path = os.path.join(OUT_DIR, "detail_best_dict.json")
+            with open(best_path, "w", encoding="utf-8") as f:
+                json.dump(obj, f, ensure_ascii=False, indent=2)
+            print(f"   Saved → {best_path}")
+        except Exception as e:
+            print(f"   (navigation failed: {e})")
 
     print("\n========== DONE ==========")
-    print(f"All artifacts in ./{OUT_DIR}/")
 
 
 if __name__ == "__main__":
