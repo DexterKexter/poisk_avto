@@ -81,11 +81,16 @@ def pg_upsert_pending(rec: dict) -> bool:
     return True
 
 
+QUARANTINE_THRESHOLD = 3
+
+
 def pg_get_pending_ids(source: str, limit: int) -> list[str]:
-    """Get pending source_ids not yet present in cars."""
+    """Get pending source_ids not yet in cars and not quarantined."""
     r = _pg_request(
         "GET",
-        f"pending_ids?source=eq.{source}&select=source_id&limit={limit * 3}",
+        f"pending_ids?source=eq.{source}"
+        f"&failed_attempts=lt.{QUARANTINE_THRESHOLD}"
+        f"&select=source_id&limit={limit * 3}",
     )
     if r.status_code != 200:
         print(f"  PG fetch pending FAIL: {r.text[:200]}")
@@ -99,6 +104,28 @@ def pg_get_pending_ids(source: str, limit: int) -> list[str]:
 
     new_ones = [sid for sid in pending if sid not in scraped]
     return new_ones[:limit]
+
+
+def pg_mark_failed(source: str, source_id: str) -> bool:
+    """Increment failed_attempts and update last_failed_at via RPC-like PATCH."""
+    r = _pg_request(
+        "GET",
+        f"pending_ids?source=eq.{source}&source_id=eq.{source_id}"
+        f"&select=failed_attempts",
+    )
+    current = 0
+    if r.status_code == 200 and r.json():
+        current = r.json()[0].get("failed_attempts") or 0
+
+    r = _pg_request(
+        "PATCH",
+        f"pending_ids?source=eq.{source}&source_id=eq.{source_id}",
+        json={
+            "failed_attempts": current + 1,
+            "last_failed_at": now_iso(),
+        },
+    )
+    return r.status_code in (200, 204)
 
 
 def pg_count(table: str, where: str = "") -> int:
@@ -172,6 +199,8 @@ CREATE TABLE IF NOT EXISTS pending_ids (
     source_id TEXT NOT NULL,
     metadata TEXT,
     found_at TEXT,
+    failed_attempts INTEGER NOT NULL DEFAULT 0,
+    last_failed_at TEXT,
     PRIMARY KEY (source, source_id)
 );
 """
@@ -185,6 +214,14 @@ def sqlite_conn() -> sqlite3.Connection:
     if _sqlite_conn is None:
         _sqlite_conn = sqlite3.connect(SQLITE_PATH, check_same_thread=False)
         _sqlite_conn.executescript(SQLITE_SCHEMA)
+        for stmt in (
+            "ALTER TABLE pending_ids ADD COLUMN failed_attempts INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE pending_ids ADD COLUMN last_failed_at TEXT",
+        ):
+            try:
+                _sqlite_conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
         _sqlite_conn.commit()
     return _sqlite_conn
 
@@ -234,13 +271,26 @@ def sqlite_get_pending_ids(source: str, limit: int) -> list[str]:
         """
         SELECT source_id FROM pending_ids
         WHERE source = ?
+          AND failed_attempts < ?
           AND source_id NOT IN (SELECT source_id FROM cars WHERE source = ?)
         ORDER BY found_at DESC
         LIMIT ?
         """,
-        (source, source, limit),
+        (source, QUARANTINE_THRESHOLD, source, limit),
     ).fetchall()
     return [r[0] for r in rows]
+
+
+def sqlite_mark_failed(source: str, source_id: str) -> bool:
+    conn = sqlite_conn()
+    conn.execute(
+        "UPDATE pending_ids "
+        "SET failed_attempts = failed_attempts + 1, last_failed_at = ? "
+        "WHERE source = ? AND source_id = ?",
+        (now_iso(), source, source_id),
+    )
+    conn.commit()
+    return True
 
 
 def sqlite_count(table: str, where_sql: str = "", params: tuple = ()) -> int:
@@ -269,6 +319,12 @@ def get_pending_ids(source: str, limit: int) -> list[str]:
     if USE_POSTGRES:
         return pg_get_pending_ids(source, limit)
     return sqlite_get_pending_ids(source, limit)
+
+
+def mark_failed(source: str, source_id: str) -> bool:
+    if USE_POSTGRES:
+        return pg_mark_failed(source, source_id)
+    return sqlite_mark_failed(source, source_id)
 
 
 def count_cars(source: str = "") -> int:
