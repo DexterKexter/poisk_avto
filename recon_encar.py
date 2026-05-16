@@ -1,13 +1,15 @@
 """
-recon_encar.py — STEP 6: capture XHR on detail page to find the data API.
+recon_encar.py — STEP 7: probe the discovered API endpoint without render.
 
-Step 5 confirmed detail page at fem.encar.com/cars/detail/{Id} returns
-HTTP 200 but no __NEXT_DATA__ — it's a React app (react-helmet) that
-loads data via XHR after page render.
+Step 6 found that fem.encar.com loads car data via XHR to
+  https://api.encar.com/v1/readside/vehicles?vehicleIds=...&include=...
+which returns JSON with VIN, photos, options, spec, etc.
 
-Step 6 enables xhr=True to capture every background HTTP call the
-detail page makes. We then save all api.encar.com responses to find the
-endpoint that returns the full car JSON (including VIN, options, etc).
+Step 7 tries to hit this endpoint DIRECTLY through Oxylabs without
+render=html. If it returns 200 with JSON → we have a $0.002 fast path
+for the scrape step. If 403/blocked → we'll have to fall back to render.
+
+We try with our known listing ID (41203231) and ask for all known includes.
 
 Env: OXY_USER, OXY_PASS
 """
@@ -26,127 +28,136 @@ OXY_URL = "https://realtime.oxylabs.io/v1/queries"
 OUT_DIR = "recon_artifacts"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-TARGET_ID = "41203231"
-TARGET_URL = f"https://fem.encar.com/cars/detail/{TARGET_ID}"
+# Includes seen in the captured XHR + a few likely extras.
+INCLUDES = ("SPEC,ADVERTISEMENT,PHOTOS,CATEGORY,MANAGE,CONTACT,VIEW,"
+            "OPTIONS,CONDITION,PARTNERSHIP,CONTENTS,VEHICLETYPE")
+
+# Try the listing ID; if it 404s we'll try alternates.
+TARGET_IDS = ["41203231"]
+
+API_URL = (
+    "https://api.encar.com/v1/readside/vehicles"
+    f"?vehicleIds={','.join(TARGET_IDS)}"
+    f"&include={INCLUDES}"
+)
 
 VIN_RE = re.compile(r'[A-HJ-NPR-Z0-9]{17}')
+
+
+def probe(url: str, label: str, *, render: bool = False) -> dict:
+    payload = {
+        "source": "universal",
+        "url": url,
+        "geo_location": "South Korea",
+    }
+    if render:
+        payload["render"] = "html"
+
+    print(f"\n========== {label} ==========")
+    print(f"URL: {url}")
+    print(f"render: {render}, geo: South Korea")
+
+    r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS), json=payload, timeout=300)
+    if r.status_code != 200:
+        print(f"OXY HTTP {r.status_code}: {r.text[:300]}")
+        return {"oxy_status": r.status_code, "error": r.text[:300]}
+
+    data = r.json()
+    results = data.get("results", []) or []
+    if not results:
+        print("no results")
+        return {"oxy_status": 200, "error": "no results"}
+
+    res = results[0]
+    target_status = res.get("status_code")
+    content = res.get("content")
+    print(f"Target HTTP status: {target_status}")
+    print(f"Final URL: {res.get('url')}")
+    print(f"Content type: {type(content).__name__}")
+
+    summary = {"oxy_status": 200, "target_status": target_status,
+               "url_final": res.get("url")}
+
+    if isinstance(content, dict):
+        # Direct JSON
+        print(f"Content is JSON dict, top keys: {list(content.keys())[:15]}")
+        summary["json_top_keys"] = list(content.keys())
+        path = os.path.join(OUT_DIR, f"step7_{label}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(content, f, ensure_ascii=False, indent=2)
+        summary["saved"] = path
+        return summary
+
+    if isinstance(content, list):
+        print(f"Content is JSON list of {len(content)}")
+        summary["json_list_len"] = len(content)
+        if content and isinstance(content[0], dict):
+            print(f"  first item keys: {list(content[0].keys())[:30]}")
+        path = os.path.join(OUT_DIR, f"step7_{label}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(content, f, ensure_ascii=False, indent=2)
+        summary["saved"] = path
+        return summary
+
+    # String content
+    print(f"Length: {len(content)}")
+    print(f"First 300 chars: {content[:300]!r}")
+
+    # Maybe wrapped JSON
+    try:
+        j = json.loads(content)
+        print("(content is JSON string — parsed)")
+        if isinstance(j, list):
+            print(f"  list of {len(j)}")
+            if j and isinstance(j[0], dict):
+                print(f"  first item keys: {list(j[0].keys())[:30]}")
+        elif isinstance(j, dict):
+            print(f"  dict top keys: {list(j.keys())[:15]}")
+        path = os.path.join(OUT_DIR, f"step7_{label}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(j, f, ensure_ascii=False, indent=2)
+        summary["saved"] = path
+        summary["parsed_json"] = True
+
+        vins = VIN_RE.findall(content)
+        if vins:
+            print(f"✅ VIN-pattern found: {set(vins)}")
+    except Exception:
+        # Not JSON — could be HTML 403 page
+        path = os.path.join(OUT_DIR, f"step7_{label}.html")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content[:16000])
+        summary["saved_html"] = path
+
+    return summary
 
 
 def main() -> None:
     if not OXY_USER or not OXY_PASS:
         sys.exit("ERROR: OXY_USER / OXY_PASS not set")
 
-    payload = {
-        "source": "universal",
-        "url": TARGET_URL,
-        "geo_location": "South Korea",
-        "render": "html",
-        "xhr": True,
-        # A few scrolls so any lazy-loaded sections (gallery, options,
-        # accident report) trigger their fetches too.
-        "browser_instructions": [
-            {"type": "scroll_to_bottom", "wait_time_s": 2} for _ in range(4)
-        ],
-    }
+    print(f"Step 7: probe encar API endpoint directly.")
+    print(f"Target IDs: {TARGET_IDS}")
+    print(f"Includes: {INCLUDES}\n")
 
-    print(f"Probing detail page WITH xhr capture: {TARGET_URL}")
-    print("Payload: render=html, xhr=True, geo=South Korea, scrolls=4\n")
+    # First try: no render (cheap path)
+    print("\n--- A. Direct API call WITHOUT render (~$0.002) ---")
+    a = probe(API_URL, "A_no_render", render=False)
 
-    r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS), json=payload, timeout=300)
-    print(f"Oxylabs HTTP: {r.status_code}")
-    if r.status_code != 200:
-        sys.exit(f"OXY error body: {r.text[:300]}")
-
-    data = r.json()
-    results = data.get("results", []) or []
-    print(f"Results returned: {len(results)}\n")
-
-    xhr_block = next((res for res in results if res.get("type") == "xhr"), None)
-    if not xhr_block:
-        print("⚠️  No XHR block in results — checking other result types:")
-        for i, res in enumerate(results):
-            print(f"  [{i}] type={res.get('type')}, status={res.get('status_code')}")
-        return
-
-    captured = xhr_block.get("content", []) or []
-    print(f"Total XHR requests captured: {len(captured)}\n")
-
-    # ---------- Print every call ----------
-    api_calls = []
-    print("All XHR calls (method | status | size | URL):")
-    for req in captured:
-        url = req.get("url", "") or ""
-        method = req.get("method", "?")
-        status = req.get("status_code", "?")
-        size = len(req.get("response_body") or "")
-        print(f"  {method:4s} | {status} | {size:>7} | {url[:200]}")
-        # Skip ads / sentry / static
-        ignore = ("ingest.sentry.io", "googletagmanager",
-                  "RealMedia/ads", "/assets/", "/static/",
-                  "/translate", "exchange-rate")
-        if any(s in url for s in ignore):
-            continue
-        if size > 0 and ("api.encar.com" in url or "encar.com/api" in url
-                          or "/cars/" in url or "/vehicles" in url):
-            api_calls.append(req)
-
-    print(f"\nFiltered to {len(api_calls)} API calls likely carrying car data")
-
-    # ---------- For each likely API call, peek at content ----------
-    for i, req in enumerate(api_calls):
-        url = req.get("url", "")
-        body = req.get("response_body", "")
-        print(f"\n========== API CALL #{i+1} ==========")
-        print(f"URL: {url}")
-        print(f"Method: {req.get('method')}, status: {req.get('status_code')}, "
-              f"size: {len(body)}")
-
-        # Try to parse as JSON
-        try:
-            j = json.loads(body)
-            if isinstance(j, dict):
-                top_keys = list(j.keys())
-                print(f"JSON dict, top keys ({len(top_keys)}): {top_keys[:30]}")
-            elif isinstance(j, list):
-                print(f"JSON list of {len(j)}")
-                if j and isinstance(j[0], dict):
-                    print(f"  first item keys: {list(j[0].keys())[:30]}")
-        except Exception:
-            print(f"Not JSON. First 200 chars: {body[:200]!r}")
-            continue
-
-        # Look for VIN in body
-        vins = VIN_RE.findall(body)
-        if vins:
-            print(f"✅ VIN-pattern found in body: {set(vins)}")
-
-        # Save full body to file
-        safe_name = re.sub(r'[^a-zA-Z0-9]', '_', url[:80])
-        out_path = os.path.join(OUT_DIR, f"api_{i+1}_{safe_name[:60]}.json")
-        try:
-            j = json.loads(body)
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(j, f, ensure_ascii=False, indent=2)
-        except Exception:
-            with open(out_path, "w", encoding="utf-8") as f:
-                f.write(body)
-        print(f"Saved → {out_path}")
-
-    # Also save everything captured (raw)
-    all_path = os.path.join(OUT_DIR, "detail_xhr_all.json")
-    with open(all_path, "w", encoding="utf-8") as f:
-        # Only metadata + first 2KB of each body to avoid huge file
-        compact = []
-        for req in captured:
-            compact.append({
-                "method": req.get("method"),
-                "url": req.get("url"),
-                "status_code": req.get("status_code"),
-                "response_body_preview": (req.get("response_body") or "")[:2000],
-                "response_body_full_size": len(req.get("response_body") or ""),
-            })
-        json.dump(compact, f, ensure_ascii=False, indent=2)
-    print(f"\nAll XHR (compact) → {all_path}")
+    # If A succeeded with JSON we're done. Otherwise try with render as fallback.
+    if a.get("target_status") == 200 and (a.get("json_top_keys")
+                                          or a.get("json_list_len")
+                                          or a.get("parsed_json")):
+        print("\n🎯 SUCCESS without render — the API is openly accessible.")
+        print("    Future scrape_encar.py can use this path for ~$0.002 per batch of 5.")
+    else:
+        print(f"\nA failed (status {a.get('target_status')}). "
+              "Trying again WITH render as fallback…")
+        b = probe(API_URL, "B_with_render", render=True)
+        if b.get("target_status") == 200:
+            print("\n⚠️  Works only with render=html (~$0.04 each, same as detail page).")
+        else:
+            print(f"\n❌ Both A and B failed. Need to investigate auth/headers.")
 
     print("\n========== DONE ==========")
 
