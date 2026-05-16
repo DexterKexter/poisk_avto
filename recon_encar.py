@@ -1,24 +1,17 @@
 """
-recon_encar.py — STEP 1: probe ONE encar URL to figure out how the site works.
+recon_encar.py — STEP 3: dig into __NEXT_DATA__ to locate car list and fields.
 
-We send the listing page through Oxylabs with:
-  - geo_location="South Korea"  (in case the site blocks non-KR traffic)
-  - render="html"               (run headless browser, JS executes)
-  - xhr=True                    (capture every background HTTP call the page makes)
-  - scroll 3 times              (in case the list lazy-loads on scroll)
+Step 2 confirmed encar is Next.js SSR with __NEXT_DATA__ in HTML.
+Now we drill into the JSON tree to find:
+  - which path holds the array of cars (likely props.pageProps.*)
+  - how many cars per page
+  - what fields each car has (looking for VIN, price, year, mileage…)
 
-Then we report:
-  - HTTP status and final URL (after redirects)
-  - Content type and length
-  - Whether __NEXT_DATA__ was found (means Next.js — same trick as dongchedi)
-  - Whether any "window.__INITIAL_STATE__" was found (Vue/React SSR)
-  - JSON-LD script blocks count
-  - First 16 KB of HTML saved for manual inspection
-  - All XHR calls the page made (URL + method + status + response size)
-  - Any XHR that looks like an API → full body saved
-
-Output goes to ./recon_artifacts/ as files we can read after the run.
-Cost: ~$0.04 (one render+xhr request).
+Output:
+  - recon_artifacts/next_data_full.json    — full __NEXT_DATA__
+  - recon_artifacts/page_props_overview.txt — readable top-level structure
+  - recon_artifacts/car_list_sample.json   — first 3 cars from best candidate
+  - stdout: ranked list of arrays-of-objects with car-like fields
 
 Env: OXY_USER, OXY_PASS
 """
@@ -37,150 +30,156 @@ OXY_URL = "https://realtime.oxylabs.io/v1/queries"
 OUT_DIR = "recon_artifacts"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# The single URL we probe in this step. Picked because car.encar.com
-# is the modern listing UI that real users browse — anything modern that
-# encar uses for data fetching will be visible here.
 TARGET_URL = "https://car.encar.com/list/car"
 
 NEXT_DATA_RE = re.compile(
     r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL
 )
-JSON_LD_RE = re.compile(
-    r'<script[^>]*type="application/ld\+json"[^>]*>(.*?)</script>', re.DOTALL
-)
-INITIAL_STATE_RE = re.compile(
-    r'window\.__(?:INITIAL_STATE|NUXT|PROPS)__\s*=\s*(\{.*?\})\s*[;<]', re.DOTALL
-)
+
+# Heuristic: a car-shaped dict typically has 2+ of these (case-insensitive).
+CAR_HINT_KEYS = {
+    "price", "year", "mileage", "model", "modelnm", "modelname",
+    "manufacturer", "manufacturernm", "make",
+    "vin", "carid", "id", "no", "vehicleid",
+    "color", "fueltype", "fuel", "transmission",
+    "image", "imagepath", "thumbnail",
+}
+
+
+def walk(node, path="$", out=None, depth=0, max_depth=12):
+    """Recursively find arrays-of-dicts. Score by car-likeness of keys."""
+    if out is None:
+        out = []
+    if depth > max_depth:
+        return out
+
+    if isinstance(node, list):
+        if node and isinstance(node[0], dict):
+            first = node[0]
+            keys = {k.lower() for k in first.keys() if isinstance(k, str)}
+            score = len(keys & CAR_HINT_KEYS)
+            out.append({
+                "path": path,
+                "len": len(node),
+                "score": score,
+                "first_keys": list(first.keys()),
+                "sample_3": node[:3],
+            })
+        # Don't recurse into list children (avoids noise from nested arrays).
+    elif isinstance(node, dict):
+        for k, v in node.items():
+            walk(v, f"{path}.{k}", out, depth + 1, max_depth)
+    return out
+
+
+def describe(value, max_str=80):
+    """One-line description of a value."""
+    if isinstance(value, list):
+        if value and isinstance(value[0], dict):
+            return f"list[{len(value)}] of dicts; first keys: {list(value[0].keys())[:10]}"
+        return f"list[{len(value)}] of {type(value[0]).__name__ if value else '?'}"
+    if isinstance(value, dict):
+        return f"dict; keys: {list(value.keys())[:12]}"
+    s = str(value)
+    return f"{type(value).__name__} = {s[:max_str]}{'...' if len(s) > max_str else ''}"
 
 
 def main() -> None:
     if not OXY_USER or not OXY_PASS:
         sys.exit("ERROR: OXY_USER / OXY_PASS not set")
 
-    # STEP 2: request HTML without xhr capture.
-    # Previous run with xhr=True returned only the XHR list, no HTML body.
-    # Now we want the rendered DOM so we can check for __NEXT_DATA__ /
-    # window.__INITIAL_STATE__ / car cards in HTML.
     payload = {
         "source": "universal",
         "url": TARGET_URL,
         "geo_location": "South Korea",
         "render": "html",
-        # NOTE: no "xhr": True — we want the HTML body back.
-        # Still scrolling so any lazy-loaded markup ends up in the DOM.
         "browser_instructions": [
-            {"type": "scroll_to_bottom", "wait_time_s": 2}
-            for _ in range(3)
+            {"type": "scroll_to_bottom", "wait_time_s": 2} for _ in range(3)
         ],
     }
 
     print(f"Probing {TARGET_URL}")
-    print("Payload: render=html, geo=South Korea, scrolls=3 (NO xhr)")
-    print("Sending to Oxylabs… (takes ~30-60s for a render request)\n")
+    print("Fetching HTML, extracting __NEXT_DATA__, finding car list…\n")
 
-    r = requests.post(
-        OXY_URL, auth=(OXY_USER, OXY_PASS),
-        json=payload, timeout=300,
-    )
-    print(f"Oxylabs HTTP: {r.status_code}")
-
+    r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS), json=payload, timeout=300)
     if r.status_code != 200:
-        print(f"ERROR body: {r.text[:500]}")
-        sys.exit(1)
+        sys.exit(f"OXY HTTP {r.status_code}: {r.text[:300]}")
 
-    data = r.json()
-    results = data.get("results", []) or []
-    print(f"Results returned: {len(results)}")
+    results = r.json().get("results", []) or []
+    if not results:
+        sys.exit("no results")
+    content = results[0].get("content")
+    if not isinstance(content, str):
+        sys.exit(f"content is {type(content).__name__}, expected string")
 
-    main_result = next((res for res in results if res.get("type") != "xhr"), None)
-    xhr_block = next((res for res in results if res.get("type") == "xhr"), None)
+    print(f"Got HTML: {len(content)} chars, final URL: {results[0].get('url')}\n")
 
-    # ---------- Main page result ----------
-    print("\n========== MAIN PAGE ==========")
-    if not main_result:
-        print("WARNING: no main (non-xhr) result captured")
+    m = NEXT_DATA_RE.search(content)
+    if not m:
+        sys.exit("__NEXT_DATA__ tag NOT found")
+    try:
+        nd = json.loads(m.group(1))
+    except Exception as e:
+        sys.exit(f"__NEXT_DATA__ invalid JSON: {e}")
+
+    full_path = os.path.join(OUT_DIR, "next_data_full.json")
+    with open(full_path, "w", encoding="utf-8") as f:
+        json.dump(nd, f, ensure_ascii=False, indent=2)
+    print(f"✅ __NEXT_DATA__ saved → {full_path} ({len(m.group(1))} chars)\n")
+
+    # ---------- Overview of props.pageProps ----------
+    page_props = nd.get("props", {}).get("pageProps", {})
+    print("========== props.pageProps OVERVIEW ==========")
+    print(f"pageProps top keys: {list(page_props.keys())}\n")
+    overview_lines = [f"props.pageProps keys: {list(page_props.keys())}", ""]
+    for k, v in page_props.items():
+        line = f"  {k}: {describe(v)}"
+        print(line)
+        overview_lines.append(line)
+    overview_path = os.path.join(OUT_DIR, "page_props_overview.txt")
+    with open(overview_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(overview_lines))
+    print(f"\nSaved → {overview_path}\n")
+
+    # ---------- Find car-like arrays ----------
+    print("========== SEARCHING FOR CAR ARRAYS ==========")
+    candidates = walk(nd)
+    candidates.sort(key=lambda x: (-x["score"], -x["len"]))
+
+    print(f"Total arrays-of-dicts found: {len(candidates)}")
+    print("\nTop 10 (by car-likeness score):\n")
+    for c in candidates[:10]:
+        flag = "🎯" if c["score"] >= 3 else ("✨" if c["score"] >= 2 else "  ")
+        print(f"{flag} score={c['score']} len={c['len']:>5}  {c['path']}")
+        print(f"     keys: {c['first_keys'][:15]}")
+        print()
+
+    # Save top 3 candidates' samples
+    for i, c in enumerate(candidates[:3]):
+        sample_path = os.path.join(OUT_DIR, f"candidate_{i+1}_sample.json")
+        with open(sample_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "path": c["path"],
+                "total_items_at_path": c["len"],
+                "score": c["score"],
+                "first_3_items": c["sample_3"],
+            }, f, ensure_ascii=False, indent=2)
+
+    if candidates and candidates[0]["score"] >= 2:
+        winner = candidates[0]
+        # Save the best one's first item under a fixed name too
+        first_car_path = os.path.join(OUT_DIR, "best_car_sample.json")
+        with open(first_car_path, "w", encoding="utf-8") as f:
+            json.dump(winner["sample_3"][0] if winner["sample_3"] else {},
+                      f, ensure_ascii=False, indent=2)
+        print(f"\n🎯 Most likely car list: {winner['path']}")
+        print(f"   ({winner['len']} cars on this page)")
+        print(f"   Sample of 1st car → {first_car_path}")
     else:
-        print(f"Target HTTP status: {main_result.get('status_code')}")
-        print(f"Final URL: {main_result.get('url')}")
-        content = main_result.get("content")
-        if isinstance(content, str):
-            print(f"Content type: string ({len(content)} chars)")
-            stripped = content.lstrip()[:1]
-            looks_like = "html" if stripped == "<" else ("json" if stripped in "{[" else "other")
-            print(f"Looks like: {looks_like}")
-
-            head_ext = ".html" if looks_like == "html" else ".txt"
-            head_path = os.path.join(OUT_DIR, f"main_head{head_ext}")
-            with open(head_path, "w", encoding="utf-8") as f:
-                f.write(content[:16000])
-            print(f"First 16KB saved → {head_path}")
-
-            if NEXT_DATA_RE.search(content):
-                m = NEXT_DATA_RE.search(content)
-                try:
-                    nd = json.loads(m.group(1))
-                    keys = list(nd.keys())
-                    print(f"✅ __NEXT_DATA__ FOUND ({len(m.group(1))} chars). "
-                          f"Top keys: {keys}")
-                    nd_path = os.path.join(OUT_DIR, "main_next_data.json")
-                    with open(nd_path, "w", encoding="utf-8") as f:
-                        json.dump(nd, f, ensure_ascii=False, indent=2)
-                    print(f"   Full content → {nd_path}")
-                except Exception as e:
-                    print(f"⚠️  __NEXT_DATA__ tag found but JSON invalid: {e}")
-            else:
-                print("❌ __NEXT_DATA__ NOT found (so probably not Next.js)")
-
-            init = INITIAL_STATE_RE.search(content)
-            if init:
-                print(f"✅ window.__INITIAL_STATE__/__NUXT__ found "
-                      f"({len(init.group(1))} chars)")
-            else:
-                print("❌ window.__INITIAL_STATE__ not found")
-
-            jsonld = JSON_LD_RE.findall(content)
-            print(f"JSON-LD blocks: {len(jsonld)}")
-        elif isinstance(content, dict):
-            print(f"Content type: dict (already JSON). Top keys: "
-                  f"{list(content.keys())[:20]}")
-            head_path = os.path.join(OUT_DIR, "main_head.json")
-            with open(head_path, "w", encoding="utf-8") as f:
-                json.dump(content, f, ensure_ascii=False, indent=2)
-            print(f"Saved → {head_path}")
-        else:
-            print(f"Content type: {type(content).__name__} — unexpected")
-
-    # ---------- XHR captures ----------
-    print("\n========== XHR CAPTURES ==========")
-    if not xhr_block:
-        print("WARNING: xhr=True was set but no XHR block returned by Oxylabs")
-    else:
-        captured = xhr_block.get("content", []) or []
-        print(f"Total XHR requests captured: {len(captured)}")
-
-        api_calls = []
-        print("\nAll XHR calls (method | status | size | URL):")
-        for req in captured:
-            url = req.get("url", "") or ""
-            print(f"  {req.get('method'):4s} | {req.get('status_code')} | "
-                  f"{len(req.get('response_body') or ''):>6} | {url[:160]}")
-            # API-looking ones
-            if any(s in url.lower() for s in
-                   ("/api", "/search", "/vehicle", "/list", "/readside", "encar.com/")):
-                if req.get("response_body"):
-                    api_calls.append(req)
-
-        if api_calls:
-            api_path = os.path.join(OUT_DIR, "main_xhr_api_responses.json")
-            with open(api_path, "w", encoding="utf-8") as f:
-                json.dump(api_calls, f, ensure_ascii=False, indent=2)
-            print(f"\n✅ Saved {len(api_calls)} API-looking responses → {api_path}")
-        else:
-            print("\n❌ No API-looking XHR calls captured")
+        print("\n⚠️  No high-confidence car list found — manual inspection needed.")
 
     print("\n========== DONE ==========")
-    print(f"Browse ./{OUT_DIR}/ for full artifacts.")
-    print("Upload as workflow artifact (the workflow does this automatically).")
+    print(f"All artifacts in ./{OUT_DIR}/")
 
 
 if __name__ == "__main__":
