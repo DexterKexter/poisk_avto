@@ -175,6 +175,14 @@ def main() -> None:
         print(f"\n🎯 Most likely car list: {winner['path']}")
         print(f"   ({winner['len']} cars on this page)")
         print(f"   Sample of 1st car → {first_car_path}")
+
+        # Also dump full first car to stdout so we don't need to open the zip.
+        if winner["sample_3"]:
+            first = winner["sample_3"][0]
+            print("\n========== FULL FIRST CAR (all fields) ==========")
+            print(f"Total fields: {len(first)}")
+            print(json.dumps(first, ensure_ascii=False, indent=2))
+            print("========== END FIRST CAR ==========\n")
     else:
         print("\n⚠️  No high-confidence car list found — manual inspection needed.")
 
