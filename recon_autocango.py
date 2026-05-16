@@ -17,6 +17,10 @@ Env: OXY_USER, OXY_PASS
 import json
 import os
 import sys
+import traceback
+
+# Force unbuffered stdout so prints appear immediately in CI logs
+sys.stdout.reconfigure(line_buffering=True)
 
 import requests
 
@@ -31,106 +35,133 @@ API_URL = "https://www.autocango.com/api/web/usedcar/search"
 
 
 def try_post(label: str, oxy_payload: dict) -> None:
-    print(f"\n========== {label} ==========")
-    print(f"  Oxylabs payload: {json.dumps(oxy_payload, ensure_ascii=False)[:400]}")
-    r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
-                      json=oxy_payload, timeout=120)
-    print(f"  Oxylabs HTTP: {r.status_code}")
-    if r.status_code != 200:
-        print(f"  Oxy body: {r.text[:300]}")
+    print(f"\n========== {label} ==========", flush=True)
+    print(f"  Oxylabs payload: {json.dumps(oxy_payload, ensure_ascii=False)[:400]}", flush=True)
+    try:
+        r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
+                          json=oxy_payload, timeout=120)
+    except Exception as e:
+        print(f"  EXCEPTION during POST: {e}", flush=True)
+        traceback.print_exc()
         return
-    data = r.json()
+    print(f"  Oxylabs HTTP: {r.status_code}", flush=True)
+    if r.status_code != 200:
+        print(f"  Oxy body: {r.text[:300]}", flush=True)
+        return
+    try:
+        data = r.json()
+    except Exception as e:
+        print(f"  oxy response not JSON: {e}, body: {r.text[:300]}", flush=True)
+        return
     results = data.get("results", []) or []
     if not results:
-        print("  no results")
+        print("  no results", flush=True)
         return
     target_status = results[0].get("status_code")
     content = results[0].get("content")
-    print(f"  Target HTTP: {target_status}")
+    print(f"  Target HTTP: {target_status}", flush=True)
     if isinstance(content, str):
-        print(f"  Content size: {len(content)}")
-        print(f"  First 500 chars: {content[:500]}")
+        print(f"  Content size: {len(content)}", flush=True)
+        print(f"  First 500 chars: {content[:500]}", flush=True)
         try:
             j = json.loads(content)
-            print(f"  ✅ JSON dict, top keys: {list(j.keys()) if isinstance(j, dict) else type(j).__name__}")
-            # Save full
+            print(f"  ✅ JSON {type(j).__name__}, top: "
+                  f"{list(j.keys())[:15] if isinstance(j, dict) else len(j)}",
+                  flush=True)
             save = os.path.join(OUT_DIR, f"usedcar_search_{label}.json")
             with open(save, "w", encoding="utf-8") as f:
                 json.dump(j, f, ensure_ascii=False, indent=2)
-            print(f"  Saved → {save}")
-            # Find car list
+            print(f"  Saved → {save}", flush=True)
+
             def find_list(o, path="$", depth=0):
-                if depth > 5: return None
+                if depth > 5:
+                    return None
                 if isinstance(o, dict):
                     for k, v in o.items():
                         if isinstance(v, list) and v and isinstance(v[0], dict):
                             return f"{path}.{k}", v
-                        r = find_list(v, f"{path}.{k}", depth + 1)
-                        if r: return r
+                        r2 = find_list(v, f"{path}.{k}", depth + 1)
+                        if r2:
+                            return r2
                 return None
+
             found = find_list(j)
             if found:
                 path, cars = found
-                print(f"  🎯 Cars at {path} ({len(cars)} items)")
-                print(f"  First car keys: {list(cars[0].keys())[:30]}")
-                print(f"\n  ===== FIRST CAR =====")
-                print(json.dumps(cars[0], ensure_ascii=False, indent=2)[:4000])
-                print(f"  ===== END =====")
+                print(f"  🎯 Cars at {path} ({len(cars)} items)", flush=True)
+                print(f"  First car keys: {list(cars[0].keys())[:30]}", flush=True)
+                print(f"\n  ===== FIRST CAR =====", flush=True)
+                print(json.dumps(cars[0], ensure_ascii=False, indent=2)[:4000],
+                      flush=True)
+                print(f"  ===== END =====", flush=True)
         except Exception as e:
-            print(f"  Not JSON: {e}")
+            print(f"  Not JSON: {e}", flush=True)
     elif isinstance(content, dict):
-        print(f"  Content is dict already, keys: {list(content.keys())}")
-        print(json.dumps(content, ensure_ascii=False, indent=2)[:2000])
+        print(f"  Content is dict, keys: {list(content.keys())[:15]}", flush=True)
+        print(json.dumps(content, ensure_ascii=False, indent=2)[:2000], flush=True)
+    else:
+        print(f"  Content type: {type(content).__name__}", flush=True)
 
 
 def main() -> None:
+    print("Starting recon_autocango v7…", flush=True)
     if not OXY_USER or not OXY_PASS:
-        sys.exit("ERROR: OXY_USER / OXY_PASS not set")
+        print("ERROR: OXY_USER / OXY_PASS not set", flush=True)
+        sys.exit(1)
+    print(f"OXY creds present: USER len={len(OXY_USER)}, PASS len={len(OXY_PASS)}",
+          flush=True)
 
     body = json.dumps({"page": 1, "pageSize": 20, "excludeSold": True})
 
-    # Variant 1: oxylabs with method=POST + payload
-    try_post("V1_method_payload", {
-        "source": "universal",
-        "url": API_URL,
-        "geo_location": "United States",
-        "method": "POST",
-        "payload": body,
-        "headers": {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Origin": "https://www.autocango.com",
-            "Referer": "https://www.autocango.com/usedcar",
-        },
-    })
+    for label, payload in [
+        ("V1_method_payload", {
+            "source": "universal",
+            "url": API_URL,
+            "geo_location": "United States",
+            "method": "POST",
+            "payload": body,
+            "headers": {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Origin": "https://www.autocango.com",
+                "Referer": "https://www.autocango.com/usedcar",
+            },
+        }),
+        ("V2_request_method", {
+            "source": "universal",
+            "url": API_URL,
+            "geo_location": "United States",
+            "request_method": "POST",
+            "request_body": body,
+        }),
+        ("V3_body_field", {
+            "source": "universal",
+            "url": API_URL,
+            "geo_location": "United States",
+            "method": "POST",
+            "body": body,
+        }),
+        ("V4_simple_get", {
+            "source": "universal",
+            "url": API_URL,
+            "geo_location": "United States",
+        }),
+    ]:
+        try:
+            try_post(label, payload)
+        except Exception as e:
+            print(f"  TOP-LEVEL EXCEPTION in {label}: {e}", flush=True)
+            traceback.print_exc()
 
-    # Variant 2: oxylabs with request_method (some sources use this)
-    try_post("V2_request_method", {
-        "source": "universal",
-        "url": API_URL,
-        "geo_location": "United States",
-        "request_method": "POST",
-        "request_body": body,
-    })
-
-    # Variant 3: oxylabs with body field
-    try_post("V3_body_field", {
-        "source": "universal",
-        "url": API_URL,
-        "geo_location": "United States",
-        "method": "POST",
-        "body": body,
-    })
-
-    # Variant 4: just GET to see what the server says
-    try_post("V4_simple_get", {
-        "source": "universal",
-        "url": API_URL,
-        "geo_location": "United States",
-    })
-
-    print("\n========== DONE ==========")
+    print("\n========== DONE ==========", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        print("FATAL exception in main:", flush=True)
+        traceback.print_exc()
+        sys.exit(1)
