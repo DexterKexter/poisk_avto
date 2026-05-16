@@ -57,12 +57,17 @@ def main() -> None:
     if not OXY_USER or not OXY_PASS:
         sys.exit("ERROR: OXY_USER / OXY_PASS not set")
 
+    # STEP 2: request HTML without xhr capture.
+    # Previous run with xhr=True returned only the XHR list, no HTML body.
+    # Now we want the rendered DOM so we can check for __NEXT_DATA__ /
+    # window.__INITIAL_STATE__ / car cards in HTML.
     payload = {
         "source": "universal",
         "url": TARGET_URL,
         "geo_location": "South Korea",
         "render": "html",
-        "xhr": True,
+        # NOTE: no "xhr": True — we want the HTML body back.
+        # Still scrolling so any lazy-loaded markup ends up in the DOM.
         "browser_instructions": [
             {"type": "scroll_to_bottom", "wait_time_s": 2}
             for _ in range(3)
@@ -70,8 +75,8 @@ def main() -> None:
     }
 
     print(f"Probing {TARGET_URL}")
-    print("Payload: render=html, xhr=True, geo=South Korea, scrolls=3")
-    print("Sending to Oxylabs… (takes ~30-60s for a render+xhr request)\n")
+    print("Payload: render=html, geo=South Korea, scrolls=3 (NO xhr)")
+    print("Sending to Oxylabs… (takes ~30-60s for a render request)\n")
 
     r = requests.post(
         OXY_URL, auth=(OXY_USER, OXY_PASS),
