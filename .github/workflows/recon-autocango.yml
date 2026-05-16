@@ -1,0 +1,35 @@
+name: Recon autocango.com
+
+# One-shot probe of autocango.com/newcar (Chinese new-car export platform)
+# to figure out parser strategy. Manual dispatch only. ~$0.04-0.08 per run.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Probe autocango.com
+        env:
+          OXY_USER: ${{ secrets.OXY_USER }}
+          OXY_PASS: ${{ secrets.OXY_PASS }}
+        run: python recon_autocango.py
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recon-autocango-${{ github.run_id }}
+          path: recon_artifacts/
+          retention-days: 14
