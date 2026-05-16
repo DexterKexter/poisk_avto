@@ -1,13 +1,16 @@
 """
-Encar.com listing ID collector.
+Encar.com listing ID collector — direct API mode.
 
-Fetches car.encar.com/list/car?page=N via Oxylabs (render=html), extracts
-__NEXT_DATA__.props.pageProps.initialState.ryvussApi.queries.* — combining
-getCarNormal (200), getCarPreferential (40), getCarPremium (10) gives
-~250 unique cars per page.
+Hits api.encar.com/search/car/list/general?q=...&sr=|sort|offset|limit
+WITHOUT render (just a plain HTTP request through Oxylabs). Returns the
+SearchResults array as JSON. Same fields as the HTML __NEXT_DATA__
+listing (Id, Manufacturer, Model, Year, Price, Mileage, Photos, …) but:
+  - ~$0.002 per request instead of $0.04 (no render needed)
+  - clean offset-based pagination (no duplicates)
+  - up to 200 cars per request
 
 Usage:
-    python collect_encar.py --pages 5 --min-year 0 --limit 5000
+    python collect_encar.py --pages 10 --page-size 200 --min-year 0
 
 Env: OXY_USER, OXY_PASS, SUPABASE_URL, SUPABASE_KEY
 """
@@ -15,7 +18,6 @@ Env: OXY_USER, OXY_PASS, SUPABASE_URL, SUPABASE_KEY
 import argparse
 import json
 import os
-import re
 import sys
 import time
 import urllib.parse
@@ -34,81 +36,58 @@ SOURCE = "encar"
 DEFAULT_ACTION = "(And.Hidden.N._.CarType.A.)"  # all car types, not hidden
 DEFAULT_SORT = "MobileModifiedDate"             # newest activity first
 
-NEXT_DATA_RE = re.compile(
-    r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL
-)
+API_BASE = "https://api.encar.com/search/car/list/general"
 
 
-def build_listing_url(page: int,
-                      action: str = DEFAULT_ACTION,
-                      sort: str = DEFAULT_SORT) -> str:
-    search = {
-        "type": "car",
-        "action": action,
-        "toggle": {},
-        "layer": "",
-        "sort": sort,
-    }
+def build_api_url(offset: int, limit: int,
+                  action: str = DEFAULT_ACTION,
+                  sort: str = DEFAULT_SORT) -> str:
+    sr = f"|{sort}|{offset}|{limit}"
     qs = urllib.parse.urlencode({
-        "page": page,
-        "search": json.dumps(search, separators=(",", ":")),
+        "count": "true",
+        "q": action,
+        "sr": sr,
     })
-    return f"https://car.encar.com/list/car?{qs}"
+    return f"{API_BASE}?{qs}"
 
 
-def _extract_cars_from_next_data(nd: dict) -> list[dict]:
-    """Walk into the ryvussApi queries dict and merge all SearchResults."""
-    page_props = nd.get("props", {}).get("pageProps", {})
-    ryvuss = page_props.get("initialState", {}).get("ryvussApi", {})
-    queries = ryvuss.get("queries", {}) or {}
-    cars: dict[str, dict] = {}
-    for q_key, q_val in queries.items():
-        if not isinstance(q_val, dict):
-            continue
-        results = (q_val.get("data") or {}).get("SearchResults") or []
-        for car in results:
-            cid = str(car.get("Id") or "")
-            if cid:
-                cars[cid] = car
-    return list(cars.values())
-
-
-def fetch_page(page: int) -> tuple[int, list[dict]]:
+def fetch_batch(offset: int, limit: int) -> tuple[int, list[dict]]:
+    """Fetch one batch via direct API. Returns (offset, list_of_cars)."""
     if not OXY_USER or not OXY_PASS:
         sys.exit("ERROR: set OXY_USER and OXY_PASS")
-    url = build_listing_url(page)
+    url = build_api_url(offset, limit)
     payload = {
         "source": "universal",
         "url": url,
         "geo_location": "South Korea",
-        "render": "html",
-        "browser_instructions": [
-            {"type": "scroll_to_bottom", "wait_time_s": 2} for _ in range(3)
-        ],
+        # NO render — direct API call
     }
     try:
         r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
-                          json=payload, timeout=300)
+                          json=payload, timeout=120)
         if r.status_code != 200:
-            print(f"  [page {page}] HTTP {r.status_code}: {r.text[:120]}")
-            return (page, [])
+            print(f"  [offset {offset}] OXY HTTP {r.status_code}: {r.text[:120]}")
+            return (offset, [])
         results = r.json().get("results", []) or []
         if not results:
-            return (page, [])
-        content = results[0].get("content", "")
-        if not isinstance(content, str):
-            return (page, [])
-        m = NEXT_DATA_RE.search(content)
-        if not m:
-            print(f"  [page {page}] __NEXT_DATA__ not found")
-            return (page, [])
-        nd = json.loads(m.group(1))
-        cars = _extract_cars_from_next_data(nd)
-        print(f"  [page {page}] {len(cars)} cars")
-        return (page, cars)
+            return (offset, [])
+        if results[0].get("status_code") != 200:
+            print(f"  [offset {offset}] target HTTP {results[0].get('status_code')}")
+            return (offset, [])
+        content = results[0].get("content")
+        if isinstance(content, str):
+            try:
+                content = json.loads(content)
+            except json.JSONDecodeError:
+                return (offset, [])
+        if not isinstance(content, dict):
+            return (offset, [])
+        cars = content.get("SearchResults") or []
+        print(f"  [offset {offset}] {len(cars)} cars")
+        return (offset, cars)
     except Exception as e:
-        print(f"  [page {page}] exception: {e}")
-        return (page, [])
+        print(f"  [offset {offset}] exception: {e}")
+        return (offset, [])
 
 
 def fetch_known_ids() -> set[str]:
@@ -140,40 +119,47 @@ def save_id(sku_id: str, metadata: dict[str, Any]) -> bool:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pages", type=int, default=5,
-                    help="How many listing pages to fetch (250 cars each)")
-    ap.add_argument("--batch-size", type=int, default=2,
-                    help="Parallel page requests per batch")
-    ap.add_argument("--batch-pause", type=int, default=3)
+    ap.add_argument("--pages", type=int, default=10,
+                    help="How many API batches to fetch")
+    ap.add_argument("--page-size", type=int, default=200,
+                    help="Cars per batch (API supports up to ~200)")
+    ap.add_argument("--batch-size", type=int, default=4,
+                    help="Parallel API requests per batch")
+    ap.add_argument("--batch-pause", type=int, default=1)
     ap.add_argument("--min-year", type=int, default=0,
                     help="Skip cars with Year < YYYY*100 (0 = no filter)")
-    ap.add_argument("--limit", type=int, default=10000)
+    ap.add_argument("--limit", type=int, default=10000,
+                    help="Max new IDs to upsert this run")
     args = ap.parse_args()
 
+    total_target = args.pages * args.page_size
     print(f"Backend: {DB.backend_name()}")
-    print(f"Source: {SOURCE}")
-    print(f"Pages: {args.pages} × ~250 cars = up to {args.pages * 250}")
-    print(f"Batch: {args.batch_size} parallel, pause {args.batch_pause}s")
+    print(f"Source: {SOURCE} (direct API mode)")
+    print(f"Plan: {args.pages} batches × {args.page_size} cars = up to {total_target}")
+    print(f"Parallel: {args.batch_size}, pause {args.batch_pause}s")
     print(f"Filters: min_year={args.min_year}, limit={args.limit}\n")
 
     print("Loading known IDs cache…")
     known = fetch_known_ids()
     print(f"  already in DB (cars + pending): {len(known)}\n")
 
+    # Plan offsets: 0, page_size, 2*page_size, ...
+    offsets = [i * args.page_size for i in range(args.pages)]
+
     all_cars: dict[str, dict] = {}
     started = time.time()
-    pages = list(range(1, args.pages + 1))
+    total_batches = (len(offsets) + args.batch_size - 1) // args.batch_size
 
-    total_batches = (len(pages) + args.batch_size - 1) // args.batch_size
-    for batch_start in range(0, len(pages), args.batch_size):
-        batch = pages[batch_start:batch_start + args.batch_size]
+    for batch_start in range(0, len(offsets), args.batch_size):
+        batch = offsets[batch_start:batch_start + args.batch_size]
         batch_num = batch_start // args.batch_size + 1
         elapsed = int(time.time() - started)
-        print(f"Batch {batch_num}/{total_batches} (pages {batch}, "
+        print(f"Batch {batch_num}/{total_batches} (offsets {batch}, "
               f"elapsed {elapsed}s, collected {len(all_cars)}):")
 
         with ThreadPoolExecutor(max_workers=len(batch)) as pool:
-            futures = {pool.submit(fetch_page, p): p for p in batch}
+            futures = {pool.submit(fetch_batch, off, args.page_size): off
+                       for off in batch}
             for fut in as_completed(futures):
                 _, cars = fut.result()
                 for car in cars:
@@ -181,10 +167,10 @@ def main() -> None:
                     if cid and cid not in all_cars:
                         all_cars[cid] = car
 
-        if batch_start + args.batch_size < len(pages):
+        if batch_start + args.batch_size < len(offsets):
             time.sleep(args.batch_pause)
 
-    print(f"\nTotal unique cars across pages: {len(all_cars)}")
+    print(f"\nTotal unique cars across batches: {len(all_cars)}")
 
     skipped_known = skipped_old = 0
     to_save: list[tuple[str, dict]] = []

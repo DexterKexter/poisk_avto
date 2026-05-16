@@ -7,9 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       pages:
-        description: 'Listing pages to fetch (~250 cars each)'
+        description: 'API batches to fetch (200 cars each via direct API)'
         required: false
-        default: '5'
+        default: '10'
+      page_size:
+        description: 'Cars per API batch (max ~200)'
+        required: false
+        default: '200'
       min_year:
         description: 'Skip cars older than this year (0 = no filter)'
         required: false
@@ -49,7 +53,8 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           python collect_encar.py \
-            --pages       ${{ inputs.pages         || 5 }} \
+            --pages       ${{ inputs.pages         || 10 }} \
+            --page-size   ${{ inputs.page_size     || 200 }} \
             --min-year    ${{ inputs.min_year      || 0 }} \
             --limit       ${{ inputs.collect_limit || 5000 }}
 
