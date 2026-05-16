@@ -1,22 +1,23 @@
 """
-recon_yiche.py v5 — capture EXACT API URLs and replay them directly.
+recon_yiche.py v6 — try yiche sub-domains we haven't touched yet.
 
-v3 captured car_model_api URLs but truncated them at 200 chars in logs.
-v4 confirmed area_list works direct but car_model_api needs extra params
-(error 11036 "公共参数缺失" = missing common params).
+car.yiche.com path is rate-limited / bot-flagged now (v5 captured 0 XHR
+where v2 got 13). Try alternative entry points:
 
-v5 strategy:
-  1. Re-capture XHR on car.yiche.com/ with FULL URL printed.
-  2. For every URL containing 'car_model_api' — replay it EXACTLY through
-     Oxylabs without render (no browser context).
-  3. Compare: does the captured URL work without browser? If yes → cheap
-     parsing path. If no → we need render=html every time.
+  1. app.yiche.com/qichebaojiadaquan/   — "Full car price catalog"
+                                          (saw this link in v2 dump)
+  2. data.yiche.com/                    — data sub-domain (guess)
+  3. m.yiche.com/qichebaojiadaquan/     — mobile site (less protection)
+
+For each: HTML + XHR capture; look for inline JSON or API endpoints.
+Cost ~\$0.15.
 
 Env: OXY_USER, OXY_PASS
 """
 
 import json
 import os
+import re
 import sys
 
 import requests
@@ -28,9 +29,24 @@ OXY_URL = "https://realtime.oxylabs.io/v1/queries"
 OUT_DIR = "recon_artifacts"
 os.makedirs(OUT_DIR, exist_ok=True)
 
+TARGETS = [
+    ("01_baojia_app",  "https://app.yiche.com/qichebaojiadaquan/"),
+    ("02_data",        "https://data.yiche.com/"),
+    ("03_baojia_m",    "https://m.yiche.com/qichebaojiadaquan/"),
+    ("04_car_m",       "https://car.m.yiche.com/"),
+]
 
-def capture_xhr(url: str) -> list[dict]:
-    """Return raw captured XHR requests."""
+NEXT_DATA_RE = re.compile(
+    r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL
+)
+INITIAL_STATE_RE = re.compile(
+    r'window\.__(?:INITIAL_STATE|NUXT|PROPS|APP_PROPS)__\s*=\s*(\{.*?\})\s*[;<]',
+    re.DOTALL,
+)
+
+
+def probe(name: str, url: str) -> None:
+    print(f"\n========== {name}: {url} ==========")
     payload = {
         "source": "universal",
         "url": url,
@@ -40,123 +56,90 @@ def capture_xhr(url: str) -> list[dict]:
         "xhr": True,
         "browser_instructions": [
             {"type": "scroll_to_bottom", "wait_time_s": 2}
-            for _ in range(4)
+            for _ in range(3)
         ],
     }
     r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
                       json=payload, timeout=300)
     if r.status_code != 200:
         print(f"  OXY HTTP {r.status_code}: {r.text[:200]}")
-        return []
+        return
     results = r.json().get("results", []) or []
+
+    # Main HTML
+    main = next((res for res in results if res.get("type") != "xhr"),
+                results[0] if results else None)
+    if main:
+        target_status = main.get("status_code")
+        final_url = main.get("url")
+        content = main.get("content") or ""
+        print(f"  Target HTTP: {target_status}")
+        print(f"  Final URL:   {final_url}")
+        if isinstance(content, str):
+            print(f"  HTML length: {len(content)} chars")
+            # Save full content (for short pages; truncate long)
+            path = os.path.join(OUT_DIR, f"yiche_v6_{name}.html")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            print(f"  Saved → {path}")
+            # Look for inline JSON
+            if NEXT_DATA_RE.search(content):
+                m = NEXT_DATA_RE.search(content)
+                try:
+                    nd = json.loads(m.group(1))
+                    print(f"  ✅ __NEXT_DATA__ found ({len(m.group(1))} chars)")
+                    print(f"     top keys: {list(nd.keys())}")
+                    pp = nd.get("props", {}).get("pageProps", {})
+                    if pp:
+                        print(f"     pageProps: {list(pp.keys())}")
+                except Exception as e:
+                    print(f"  __NEXT_DATA__ invalid: {e}")
+            if INITIAL_STATE_RE.search(content):
+                print(f"  ✅ inline window.* JSON found")
+            # Quick scan for car-data hints
+            hints = ("seriesId", "serialId", "carId", "msrp", "price",
+                     "MasterId", "MasterName", "SerialName")
+            found_hints = [h for h in hints if h in content]
+            if found_hints:
+                print(f"  Car hints in HTML: {found_hints}")
+
+    # XHR
     xhr_block = next((res for res in results if res.get("type") == "xhr"), None)
-    if not xhr_block:
-        return []
-    return xhr_block.get("content", []) or []
-
-
-def replay_direct(url: str) -> dict:
-    """Hit the EXACT URL directly (no render)."""
-    payload = {
-        "source": "universal",
-        "url": url,
-        "geo_location": "China",
-    }
-    r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
-                      json=payload, timeout=120)
-    summary = {"oxy_http": r.status_code}
-    if r.status_code != 200:
-        summary["error"] = r.text[:200]
-        return summary
-    results = r.json().get("results", []) or []
-    if not results:
-        summary["error"] = "no results"
-        return summary
-    summary["target_status"] = results[0].get("status_code")
-    content = results[0].get("content")
-    if isinstance(content, str):
-        summary["size"] = len(content)
-        summary["preview"] = content[:600]
-        try:
-            j = json.loads(content)
-            summary["json_top_keys"] = (list(j.keys()) if isinstance(j, dict)
-                                         else f"list[{len(j)}]")
-        except Exception:
-            summary["json"] = False
-    return summary
+    if xhr_block:
+        captured = xhr_block.get("content", []) or []
+        print(f"\n  XHR captured: {len(captured)}")
+        api_urls = []
+        for req in captured:
+            url2 = req.get("url", "") or ""
+            if any(s in url2 for s in (
+                "sentry", "google", "doubleclick", "/ads/", "/assets/",
+                "/static/", "fonts.", "apm-engine", "/log?",
+                "miaozhen", "tanx.com",
+            )):
+                continue
+            size = len(req.get("response_body") or "")
+            if size < 200:
+                continue
+            print(f"    {req.get('method')} {req.get('status_code')} "
+                  f"{size:>7}b: {url2}")
+            api_urls.append(req)
+        if api_urls:
+            save = os.path.join(OUT_DIR, f"yiche_v6_{name}_xhr.json")
+            with open(save, "w", encoding="utf-8") as f:
+                json.dump([{
+                    "url": r.get("url"),
+                    "method": r.get("method"),
+                    "status": r.get("status_code"),
+                    "response_body_preview": (r.get("response_body") or "")[:2000],
+                } for r in api_urls], f, ensure_ascii=False, indent=2)
+            print(f"  XHR saved → {save}")
 
 
 def main() -> None:
     if not OXY_USER or not OXY_PASS:
         sys.exit("ERROR: OXY_USER / OXY_PASS not set")
-
-    target = "https://car.yiche.com/"
-    print(f"Capturing XHR from {target}\n")
-
-    captured = capture_xhr(target)
-    print(f"Captured {len(captured)} XHR calls\n")
-
-    # Print full URLs of car_model_api calls — no truncation
-    print("========== FULL URLs (car_model_api) ==========")
-    car_model_urls = []
-    for req in captured:
-        url = req.get("url", "") or ""
-        if "car_model_api" not in url:
-            continue
-        method = req.get("method")
-        status = req.get("status_code")
-        size = len(req.get("response_body") or "")
-        print(f"\n  {method} {status} ({size} bytes):")
-        print(f"  {url}")
-        car_model_urls.append((req, url))
-
-    if not car_model_urls:
-        print("No car_model_api URLs captured — nothing to replay.")
-        # Show all captured URLs as fallback
-        print("\n========== ALL captured URLs ==========")
-        for req in captured:
-            url = req.get("url", "") or ""
-            if any(s in url for s in ("sentry", "google", "/log?", "apm-",
-                                       "doubleclick", "miaozhen")):
-                continue
-            print(f"  {req.get('method')} {req.get('status_code')} | {url}")
-        return
-
-    # Save captured bodies too
-    save_path = os.path.join(OUT_DIR, "yiche_v5_xhr_full.json")
-    with open(save_path, "w", encoding="utf-8") as f:
-        json.dump([{
-            "url": req.get("url"),
-            "method": req.get("method"),
-            "status": req.get("status_code"),
-            "response_body_preview": (req.get("response_body") or "")[:2000],
-        } for req, _ in car_model_urls], f, ensure_ascii=False, indent=2)
-    print(f"\nFull XHR saved → {save_path}")
-
-    # Replay each car_model_api URL directly
-    print("\n========== REPLAY DIRECT (no render) ==========")
-    for i, (req, url) in enumerate(car_model_urls, 1):
-        print(f"\n--- {i}. {url[:100]}...")
-        s = replay_direct(url)
-        print(f"    Direct: target_status={s.get('target_status')}, "
-              f"size={s.get('size')}, top_keys={s.get('json_top_keys')}")
-        if s.get("size") and s["size"] < 100:
-            print(f"    Body: {s.get('preview', '')[:200]}")
-
-        # Compare with XHR result
-        orig_size = len(req.get("response_body") or "")
-        orig_body = req.get("response_body") or ""
-        print(f"    XHR-captured size: {orig_size}")
-        # If direct size matches XHR size — same data, no auth required
-        if s.get("size") == orig_size:
-            print(f"    ✅ SAME — API works directly without browser context!")
-        elif s.get("size", 0) > 1000 and s.get("json_top_keys"):
-            print(f"    ✅ Direct returns data (different size, but valid JSON)")
-        else:
-            print(f"    ❌ Direct returns less/error than XHR")
-            # Print XHR body for comparison
-            print(f"    XHR body preview: {orig_body[:300]}")
-
+    for name, url in TARGETS:
+        probe(name, url)
     print("\n========== DONE ==========")
 
 
