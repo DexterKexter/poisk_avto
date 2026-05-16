@@ -1,17 +1,16 @@
 """
-recon_yiche.py v2 — find real yiche car catalog URLs.
+recon_yiche.py v3 — find car catalog API endpoints on mapi.yiche.com.
 
-v1 showed:
-  - yiche.com/ is editorial (news/videos), no cars
-  - car.yiche.com/ returns 16KB skeleton (need to inspect)
-  - yiche.com/newcar/ → 404
-  - API host is mapi.yiche.com
+v2 showed:
+  - car.yiche.com/ works (728KB HTML, 204 model links)
+  - car.yiche.com/han/ → Tencent captcha (model detail pages protected)
+  - mapi.yiche.com is API host
+  - homepage uses /web_api/{module}_api/api/v1/{action} pattern
 
-v2 strategy:
-  1. Re-probe car.yiche.com but DUMP FULL HTML to stdout so we can read
-     the actual <a href> links and `<script>` references.
-  2. Try a few alternative paths in parallel based on common Chinese
-     auto-site patterns (jiage = prices, brand pages, series pages).
+v3 captures XHR while opening car.yiche.com/ (the open catalog hub)
+to discover the API endpoints used for car data. Then probes a few
+likely API URLs directly (no render, $0.002 each) to confirm they
+work without captcha.
 
 Env: OXY_USER, OXY_PASS
 """
@@ -30,26 +29,9 @@ OXY_URL = "https://realtime.oxylabs.io/v1/queries"
 OUT_DIR = "recon_artifacts"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-TARGETS = [
-    # Empty skeleton from v1 — dump full content this time.
-    ("01_car_hub",        "https://car.yiche.com/"),
-    # 价格 = "prices" — common Chinese auto site path
-    ("02_jiage",          "https://www.yiche.com/jiage/"),
-    # 选车 = "choose a car"
-    ("03_xuanche",        "https://www.yiche.com/xuanche/"),
-    # Common pattern: car.yiche.com/{brand_pinyin}/
-    ("04_byd_brand",      "https://car.yiche.com/byd/"),
-    # Direct model — BYD Han is popular
-    ("05_han_series",     "https://car.yiche.com/han/"),
-    # 报价 = "quote/MSRP"
-    ("06_baojia",         "https://www.yiche.com/baojia/"),
-]
 
-HREF_RE = re.compile(r'href="([^"]+)"')
-SCRIPT_SRC_RE = re.compile(r'<script[^>]+src="([^"]+)"')
-
-
-def probe(name: str, url: str) -> None:
+def probe_xhr(name: str, url: str, scrolls: int = 4) -> None:
+    """Open URL via Oxylabs render+xhr; print and save all non-junk API calls."""
     print(f"\n========== {name}: {url} ==========")
     payload = {
         "source": "universal",
@@ -57,13 +39,62 @@ def probe(name: str, url: str) -> None:
         "geo_location": "China",
         "locale": "zh-CN",
         "render": "html",
+        "xhr": True,
+        "browser_instructions": [
+            {"type": "scroll_to_bottom", "wait_time_s": 2}
+            for _ in range(scrolls)
+        ],
     }
-    try:
-        r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
-                          json=payload, timeout=180)
-    except Exception as e:
-        print(f"  EXCEPTION: {e}")
+    r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
+                      json=payload, timeout=300)
+    if r.status_code != 200:
+        print(f"  OXY HTTP {r.status_code}")
         return
+    results = r.json().get("results", []) or []
+    xhr_block = next((res for res in results if res.get("type") == "xhr"), None)
+    if not xhr_block:
+        print("  No XHR captured")
+        return
+
+    captured = xhr_block.get("content", []) or []
+    print(f"  XHR total: {len(captured)}")
+
+    api_calls = []
+    print(f"  Method | Status | Size | URL")
+    for req in captured:
+        url2 = req.get("url", "") or ""
+        if any(s in url2 for s in (
+            "sentry", "google", "doubleclick", "/ads/", "/assets/",
+            "/static/", "fonts.", "tracker", "apm-engine",
+            "miaozhen", "tanx.com", "/log?", "/pv?",
+        )):
+            continue
+        size = len(req.get("response_body") or "")
+        method = req.get("method") or "?"
+        # Only show meaningful responses
+        if size < 100 and method == "OPTIONS":
+            continue
+        print(f"  {method:6s} | {req.get('status_code')} | {size:>7} | {url2[:200]}")
+        if size > 200 and ("yiche.com" in url2 or "/api" in url2.lower()):
+            api_calls.append(req)
+
+    if api_calls:
+        out_path = os.path.join(OUT_DIR, f"yiche_v3_{name}_xhr_api.json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(api_calls, f, ensure_ascii=False, indent=2)
+        print(f"  Saved {len(api_calls)} api responses → {out_path}")
+
+
+def probe_api(name: str, url: str) -> None:
+    """Hit an API URL directly (no render). Quick test if it returns JSON."""
+    print(f"\n========== {name}: {url} ==========")
+    payload = {
+        "source": "universal",
+        "url": url,
+        "geo_location": "China",
+    }
+    r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
+                      json=payload, timeout=120)
     if r.status_code != 200:
         print(f"  OXY HTTP {r.status_code}: {r.text[:200]}")
         return
@@ -71,58 +102,61 @@ def probe(name: str, url: str) -> None:
     if not results:
         print("  no results")
         return
-    target_status = results[0].get("status_code")
-    final_url = results[0].get("url")
-    content = results[0].get("content", "")
-    print(f"  Target HTTP: {target_status}")
-    print(f"  Final URL:   {final_url}")
+    status = results[0].get("status_code")
+    content = results[0].get("content")
+    print(f"  Target HTTP: {status}")
     if not isinstance(content, str):
-        print(f"  Content is {type(content).__name__}")
+        print(f"  Content: {type(content).__name__}, value: {content!r}"[:300])
         return
-    print(f"  HTML length: {len(content)} chars")
-
-    # Save full content
-    path = os.path.join(OUT_DIR, f"yiche_v2_{name}.html")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-    print(f"  Full HTML → {path}")
-
-    # Extract internal links pointing to yiche.com pages
-    hrefs = HREF_RE.findall(content)
-    yiche_links = sorted({h for h in hrefs
-                          if "yiche.com" in h and not any(
-                              s in h for s in (
-                                  "javascript:", "#", "mailto:",
-                                  "/ad", "/aboutus", "/contact",
-                                  "/privacy", "/terms",
-                                  "icp.gov", "weibo.com", "qq.com",
-                                  "douban.com", "youku.com"
-                              ))})
-    # Strip query strings for the unique-path overview
-    cleaned = sorted({h.split("?")[0].split("#")[0] for h in yiche_links})
-
-    print(f"\n  Internal yiche links ({len(yiche_links)} raw, "
-          f"{len(cleaned)} unique paths):")
-    for link in cleaned[:60]:
-        print(f"    {link}")
-
-    # If HTML is short, dump it fully to logs too
-    if len(content) < 20000:
-        print(f"\n  ===== FULL HTML (since short) =====")
-        print(content)
-        print(f"  ===== END HTML =====")
+    print(f"  Size: {len(content)}")
+    print(f"  First 500 chars: {content[:500]!r}")
+    # Try to parse as JSON
+    try:
+        j = json.loads(content)
+        if isinstance(j, dict):
+            print(f"  ✅ JSON dict, top keys: {list(j.keys())}")
+        elif isinstance(j, list):
+            print(f"  ✅ JSON list of {len(j)}")
+        path = os.path.join(OUT_DIR, f"yiche_v3_api_{name}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(j, f, ensure_ascii=False, indent=2)
+        print(f"  Saved → {path}")
+    except Exception:
+        print("  Not JSON")
 
 
 def main() -> None:
     if not OXY_USER or not OXY_PASS:
         sys.exit("ERROR: OXY_USER / OXY_PASS not set")
 
-    for name, url in TARGETS:
-        probe(name, url)
+    # Step 1: XHR capture on the open catalog hub
+    probe_xhr("car_hub", "https://car.yiche.com/")
+
+    # Step 2: Direct API guesses based on observed pattern
+    # From homepage we saw: mapi.yiche.com/web_api/{module}_api/api/v1/...
+    # Guess for car data:
+    API_GUESSES = [
+        ("serial_list",
+         "https://mapi.yiche.com/web_api/serial_api/api/v1/serial/list"
+         "?cid=508"),
+        ("series_list",
+         "https://mapi.yiche.com/web_api/series_api/api/v1/series/list"
+         "?cid=508"),
+        ("car_brand_list",
+         "https://mapi.yiche.com/web_api/car_api/api/v1/brand/list"
+         "?cid=508"),
+        ("series_select",
+         "https://mapi.yiche.com/serial_api/api/v1/serial/select?cid=508"),
+        ("style_api",
+         "https://mapi.yiche.com/style_api/api/v1/style/all_brand_master"
+         "?cid=508"),
+    ]
+    for name, url in API_GUESSES:
+        probe_api(name, url)
 
     print("\n========== DONE ==========")
-    print("Inspect printed links to find the real car catalog URLs,")
-    print("then a v3 will drill into those.")
+    print("If XHR on car_hub showed an API URL — that's our target.")
+    print("Any guess that returns JSON dict can be paginated/parameterized.")
 
 
 if __name__ == "__main__":
