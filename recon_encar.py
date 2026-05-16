@@ -1,15 +1,19 @@
 """
-recon_encar.py — STEP 7: probe the discovered API endpoint without render.
+recon_encar.py — pagination probe: try 3 variants to get "page 2" of cars.
 
-Step 6 found that fem.encar.com loads car data via XHR to
-  https://api.encar.com/v1/readside/vehicles?vehicleIds=...&include=...
-which returns JSON with VIN, photos, options, spec, etc.
+Current collect_encar.py uses car.encar.com/list/car?page=N which returns
+250 cars only for page 1. Pages 2-5 return 0. So the page param doesn't
+actually paginate.
 
-Step 7 tries to hit this endpoint DIRECTLY through Oxylabs without
-render=html. If it returns 200 with JSON → we have a $0.002 fast path
-for the scrape step. If 403/blocked → we'll have to fall back to render.
+This script tries three alternatives:
+  A. Same Next.js URL but inject "from":200 into the search dict.
+  B. Same Next.js URL with explicit ?from=200 query param.
+  C. Direct call to api.encar.com/search/car/list/general — the underlying
+     search API the Next.js page uses internally. Sort/offset/limit go via
+     the `sr` parameter: %7CMobileModifiedDate%7Coffset%7Climit.
 
-We try with our known listing ID (41203231) and ask for all known includes.
+Whichever returns DIFFERENT car IDs from page-1 wins → we update
+collect_encar.py to use that strategy.
 
 Env: OXY_USER, OXY_PASS
 """
@@ -18,33 +22,64 @@ import json
 import os
 import re
 import sys
+import urllib.parse
 
 import requests
 
 OXY_USER = os.environ.get("OXY_USER", "")
 OXY_PASS = os.environ.get("OXY_PASS", "")
 OXY_URL = "https://realtime.oxylabs.io/v1/queries"
-
 OUT_DIR = "recon_artifacts"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-# Includes seen in the captured XHR + a few likely extras.
-INCLUDES = ("SPEC,ADVERTISEMENT,PHOTOS,CATEGORY,MANAGE,CONTACT,VIEW,"
-            "OPTIONS,CONDITION,PARTNERSHIP,CONTENTS,VEHICLETYPE")
-
-# Try the listing ID; if it 404s we'll try alternates.
-TARGET_IDS = ["41203231"]
-
-API_URL = (
-    "https://api.encar.com/v1/readside/vehicles"
-    f"?vehicleIds={','.join(TARGET_IDS)}"
-    f"&include={INCLUDES}"
+NEXT_DATA_RE = re.compile(
+    r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL
 )
 
-VIN_RE = re.compile(r'[A-HJ-NPR-Z0-9]{17}')
+
+def build_listing_url_a(from_offset: int) -> str:
+    """Variant A: inject 'from' into the search dict."""
+    search = {
+        "type": "car",
+        "action": "(And.Hidden.N._.CarType.A.)",
+        "toggle": {},
+        "layer": "",
+        "sort": "MobileModifiedDate",
+        "from": from_offset,
+    }
+    qs = urllib.parse.urlencode({"search": json.dumps(search, separators=(",", ":"))})
+    return f"https://car.encar.com/list/car?{qs}"
 
 
-def probe(url: str, label: str, *, render: bool = False) -> dict:
+def build_listing_url_b(from_offset: int) -> str:
+    """Variant B: explicit ?from=N query param outside search."""
+    search = {
+        "type": "car",
+        "action": "(And.Hidden.N._.CarType.A.)",
+        "toggle": {},
+        "layer": "",
+        "sort": "MobileModifiedDate",
+    }
+    qs = urllib.parse.urlencode({
+        "from": from_offset,
+        "search": json.dumps(search, separators=(",", ":")),
+    })
+    return f"https://car.encar.com/list/car?{qs}"
+
+
+def build_api_url(offset: int, limit: int = 20) -> str:
+    """Variant C: direct search API."""
+    q = "(And.Hidden.N._.CarType.A.)"
+    sr = f"|MobileModifiedDate|{offset}|{limit}"
+    qs = urllib.parse.urlencode({
+        "count": "true",
+        "q": q,
+        "sr": sr,
+    })
+    return f"https://api.encar.com/search/car/list/general?{qs}"
+
+
+def probe(url: str, *, render: bool) -> tuple[int, str, str]:
     payload = {
         "source": "universal",
         "url": url,
@@ -52,125 +87,143 @@ def probe(url: str, label: str, *, render: bool = False) -> dict:
     }
     if render:
         payload["render"] = "html"
-
-    print(f"\n========== {label} ==========")
-    print(f"URL: {url}")
-    print(f"render: {render}, geo: South Korea")
-
-    r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS), json=payload, timeout=300)
+    r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
+                      json=payload, timeout=300)
     if r.status_code != 200:
-        print(f"OXY HTTP {r.status_code}: {r.text[:300]}")
-        return {"oxy_status": r.status_code, "error": r.text[:300]}
-
-    data = r.json()
-    results = data.get("results", []) or []
+        return (r.status_code, "", r.text[:200])
+    results = r.json().get("results", []) or []
     if not results:
-        print("no results")
-        return {"oxy_status": 200, "error": "no results"}
+        return (200, "", "no results")
+    target_status = results[0].get("status_code", 0)
+    content = results[0].get("content", "")
+    if isinstance(content, (dict, list)):
+        content = json.dumps(content, ensure_ascii=False)
+    elif not isinstance(content, str):
+        content = str(content)
+    return (target_status, content, "")
 
-    res = results[0]
-    target_status = res.get("status_code")
-    content = res.get("content")
-    print(f"Target HTTP status: {target_status}")
-    print(f"Final URL: {res.get('url')}")
-    print(f"Content type: {type(content).__name__}")
 
-    summary = {"oxy_status": 200, "target_status": target_status,
-               "url_final": res.get("url")}
-
-    if isinstance(content, dict):
-        # Direct JSON
-        print(f"Content is JSON dict, top keys: {list(content.keys())[:15]}")
-        summary["json_top_keys"] = list(content.keys())
-        path = os.path.join(OUT_DIR, f"step7_{label}.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(content, f, ensure_ascii=False, indent=2)
-        summary["saved"] = path
-        return summary
-
-    if isinstance(content, list):
-        print(f"Content is JSON list of {len(content)}")
-        summary["json_list_len"] = len(content)
-        if content and isinstance(content[0], dict):
-            print(f"  first item keys: {list(content[0].keys())[:30]}")
-        path = os.path.join(OUT_DIR, f"step7_{label}.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(content, f, ensure_ascii=False, indent=2)
-        summary["saved"] = path
-        return summary
-
-    # String content
-    print(f"Length: {len(content)}")
-    print(f"First 300 chars: {content[:300]!r}")
-
-    # Maybe wrapped JSON
+def extract_ids_from_html(html: str) -> list[str]:
+    m = NEXT_DATA_RE.search(html)
+    if not m:
+        return []
     try:
-        j = json.loads(content)
-        print("(content is JSON string — parsed)")
-        if isinstance(j, list):
-            print(f"  list of {len(j)}")
-            if j and isinstance(j[0], dict):
-                print(f"  first item keys: {list(j[0].keys())[:30]}")
-        elif isinstance(j, dict):
-            print(f"  dict top keys: {list(j.keys())[:15]}")
-        path = os.path.join(OUT_DIR, f"step7_{label}.json")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(j, f, ensure_ascii=False, indent=2)
-        summary["saved"] = path
-        summary["parsed_json"] = True
-
-        vins = VIN_RE.findall(content)
-        if vins:
-            print(f"✅ VIN-pattern found: {set(vins)}")
+        nd = json.loads(m.group(1))
     except Exception:
-        # Not JSON — could be HTML 403 page
-        path = os.path.join(OUT_DIR, f"step7_{label}.html")
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(content[:16000])
-        summary["saved_html"] = path
+        return []
+    queries = ((nd.get("props", {}).get("pageProps", {})
+                   .get("initialState", {}).get("ryvussApi", {})).get("queries") or {})
+    ids: list[str] = []
+    for q_val in queries.values():
+        if not isinstance(q_val, dict):
+            continue
+        results = (q_val.get("data") or {}).get("SearchResults") or []
+        for car in results:
+            cid = str(car.get("Id") or "")
+            if cid:
+                ids.append(cid)
+    return ids
 
-    return summary
+
+def extract_ids_from_api(body: str) -> list[str]:
+    """API returns JSON with SearchResults list."""
+    try:
+        obj = json.loads(body)
+    except Exception:
+        return []
+    if not isinstance(obj, dict):
+        return []
+    results = obj.get("SearchResults") or []
+    return [str(c.get("Id")) for c in results if c.get("Id")]
 
 
 def main() -> None:
     if not OXY_USER or not OXY_PASS:
         sys.exit("ERROR: OXY_USER / OXY_PASS not set")
 
-    print(f"Step 7: probe encar API endpoint directly.")
-    print(f"Target IDs: {TARGET_IDS}")
-    print(f"Includes: {INCLUDES}\n")
+    print("Goal: get page 2 (offset 200) of encar listing, different IDs from page 1.\n")
 
-    # First try: no render (cheap path)
-    print("\n--- A. Direct API call WITHOUT render (~$0.002) ---")
-    a = probe(API_URL, "A_no_render", render=False)
+    # Baseline: page 1 via current URL to get reference set
+    print("====== BASELINE: page 1 (current collect_encar URL) ======")
+    base_url = build_listing_url_a(0)
+    status, content, err = probe(base_url, render=True)
+    print(f"URL: {base_url[:140]}")
+    print(f"HTTP: {status}")
+    page1_ids = extract_ids_from_html(content) if status == 200 else []
+    print(f"IDs found: {len(page1_ids)}")
+    if page1_ids:
+        print(f"  first 5: {page1_ids[:5]}")
+        print(f"  last 5:  {page1_ids[-5:]}")
 
-    # If A succeeded with JSON we're done. Otherwise try with render as fallback.
-    if a.get("target_status") == 200 and (a.get("json_top_keys")
-                                          or a.get("json_list_len")
-                                          or a.get("parsed_json")):
-        print("\n🎯 SUCCESS without render — the API is openly accessible.")
-        print("    Future scrape_encar.py can use this path for ~$0.002 per batch of 5.")
-
-        # Step 8: also dump full first car JSON to stdout so we can map
-        # fields without downloading the artifact.
-        saved_file = a.get("saved")
-        if saved_file and os.path.exists(saved_file):
-            with open(saved_file, encoding="utf-8") as f:
-                obj = json.load(f)
-            car = obj[0] if isinstance(obj, list) and obj else obj
-            print("\n========== FULL CAR FROM API (all nested fields) ==========")
-            print(json.dumps(car, ensure_ascii=False, indent=2))
-            print("========== END FULL CAR ==========\n")
-    else:
-        print(f"\nA failed (status {a.get('target_status')}). "
-              "Trying again WITH render as fallback…")
-        b = probe(API_URL, "B_with_render", render=True)
-        if b.get("target_status") == 200:
-            print("\n⚠️  Works only with render=html (~$0.04 each, same as detail page).")
+    # Variant A: from in search dict
+    print("\n====== VARIANT A: search dict includes 'from':200 ======")
+    url_a = build_listing_url_a(200)
+    status, content, err = probe(url_a, render=True)
+    print(f"URL: {url_a[:140]}")
+    print(f"HTTP: {status}")
+    ids_a = extract_ids_from_html(content) if status == 200 else []
+    print(f"IDs found: {len(ids_a)}")
+    if ids_a:
+        new_a = set(ids_a) - set(page1_ids)
+        print(f"  first 5: {ids_a[:5]}")
+        print(f"  NEW vs page1: {len(new_a)}/{len(ids_a)}")
+        if len(new_a) > len(ids_a) * 0.5:
+            print("  ✅ VARIANT A WORKS — different cars from page 1")
         else:
-            print(f"\n❌ Both A and B failed. Need to investigate auth/headers.")
+            print("  ❌ Same cars as page 1 — no pagination")
+
+    # Variant B: explicit ?from=200
+    print("\n====== VARIANT B: explicit ?from=200 query param ======")
+    url_b = build_listing_url_b(200)
+    status, content, err = probe(url_b, render=True)
+    print(f"URL: {url_b[:140]}")
+    print(f"HTTP: {status}")
+    ids_b = extract_ids_from_html(content) if status == 200 else []
+    print(f"IDs found: {len(ids_b)}")
+    if ids_b:
+        new_b = set(ids_b) - set(page1_ids)
+        print(f"  first 5: {ids_b[:5]}")
+        print(f"  NEW vs page1: {len(new_b)}/{len(ids_b)}")
+        if len(new_b) > len(ids_b) * 0.5:
+            print("  ✅ VARIANT B WORKS")
+        else:
+            print("  ❌ Same cars as page 1")
+
+    # Variant C: direct API
+    print("\n====== VARIANT C: direct api.encar.com/search/car/list/general ======")
+    url_c0 = build_api_url(0, 20)
+    url_c200 = build_api_url(200, 20)
+
+    print(f"\n  C.1 offset=0, limit=20:")
+    print(f"  URL: {url_c0[:160]}")
+    status, content, err = probe(url_c0, render=False)
+    print(f"  HTTP: {status}, size: {len(content)}")
+    ids_c0 = extract_ids_from_api(content) if status == 200 else []
+    print(f"  IDs found: {len(ids_c0)}")
+    if ids_c0:
+        print(f"    first 5: {ids_c0[:5]}")
+
+    print(f"\n  C.2 offset=200, limit=20:")
+    print(f"  URL: {url_c200[:160]}")
+    status, content, err = probe(url_c200, render=False)
+    print(f"  HTTP: {status}, size: {len(content)}")
+    ids_c200 = extract_ids_from_api(content) if status == 200 else []
+    print(f"  IDs found: {len(ids_c200)}")
+    if ids_c200:
+        new_c = set(ids_c200) - set(ids_c0)
+        print(f"    first 5: {ids_c200[:5]}")
+        print(f"    NEW vs C.1: {len(new_c)}/{len(ids_c200)}")
+        if status == 200 and len(new_c) > len(ids_c200) * 0.5:
+            print("  ✅ VARIANT C WORKS — direct API paginates correctly")
+            print("    AND it works WITHOUT render → \\$0.002 per page!")
+            # Save sample
+            sample_path = os.path.join(OUT_DIR, "api_general_sample.json")
+            with open(sample_path, "w", encoding="utf-8") as f:
+                f.write(content[:50000])
+            print(f"    Sample saved → {sample_path}")
 
     print("\n========== DONE ==========")
+    print("Compare the three variants above. Whichever shows >50% NEW IDs wins.")
 
 
 if __name__ == "__main__":
