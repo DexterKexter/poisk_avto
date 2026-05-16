@@ -1,24 +1,25 @@
 """
-recon_yiche.py v6 — try yiche sub-domains we haven't touched yet.
+recon_yiche.py v7 — replay the EXACT captured URL without render.
 
-car.yiche.com path is rate-limited / bot-flagged now (v5 captured 0 XHR
-where v2 got 13). Try alternative entry points:
+v6 captured the full working URL from car.m.yiche.com/:
+  mapi.yiche.com/web_api/car_model_api/api/v1/serial/search_hot_serials
+    ?cid=508&param={"adCigdcid":"<token>","type":5,"adTime":"...","num":20}
 
-  1. app.yiche.com/qichebaojiadaquan/   — "Full car price catalog"
-                                          (saw this link in v2 dump)
-  2. data.yiche.com/                    — data sub-domain (guess)
-  3. m.yiche.com/qichebaojiadaquan/     — mobile site (less protection)
+Test if the API accepts:
+  A. The captured adCigdcid token verbatim (it's freshly generated)
+  B. A fake adCigdcid like "test"
+  C. Empty adCigdcid
 
-For each: HTML + XHR capture; look for inline JSON or API endpoints.
-Cost ~\$0.15.
+Then dump the JSON to map field structure.
 
 Env: OXY_USER, OXY_PASS
 """
 
+import datetime
 import json
 import os
-import re
 import sys
+import urllib.parse
 
 import requests
 
@@ -29,118 +30,96 @@ OXY_URL = "https://realtime.oxylabs.io/v1/queries"
 OUT_DIR = "recon_artifacts"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-TARGETS = [
-    ("01_baojia_app",  "https://app.yiche.com/qichebaojiadaquan/"),
-    ("02_data",        "https://data.yiche.com/"),
-    ("03_baojia_m",    "https://m.yiche.com/qichebaojiadaquan/"),
-    ("04_car_m",       "https://car.m.yiche.com/"),
-]
-
-NEXT_DATA_RE = re.compile(
-    r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.DOTALL
-)
-INITIAL_STATE_RE = re.compile(
-    r'window\.__(?:INITIAL_STATE|NUXT|PROPS|APP_PROPS)__\s*=\s*(\{.*?\})\s*[;<]',
-    re.DOTALL,
-)
+API_BASE = ("https://mapi.yiche.com/web_api/car_model_api"
+            "/api/v1/serial/search_hot_serials")
+TODAY = datetime.date.today().isoformat()
 
 
-def probe(name: str, url: str) -> None:
-    print(f"\n========== {name}: {url} ==========")
+def build_url(ad_cigdcid: str, num: int = 20) -> str:
+    param = {
+        "adCigdcid": ad_cigdcid,
+        "type": 5,
+        "adTime": TODAY,
+        "advertPage": "recon_yiche_v7",
+        "num": num,
+    }
+    return f"{API_BASE}?cid=508&param={urllib.parse.quote(json.dumps(param))}"
+
+
+def probe(name: str, url: str) -> dict:
+    print(f"\n========== {name} ==========")
+    print(f"URL: {url[:200]}{'...' if len(url) > 200 else ''}")
     payload = {
         "source": "universal",
         "url": url,
         "geo_location": "China",
-        "locale": "zh-CN",
-        "render": "html",
-        "xhr": True,
-        "browser_instructions": [
-            {"type": "scroll_to_bottom", "wait_time_s": 2}
-            for _ in range(3)
-        ],
     }
     r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
-                      json=payload, timeout=300)
+                      json=payload, timeout=120)
     if r.status_code != 200:
         print(f"  OXY HTTP {r.status_code}: {r.text[:200]}")
-        return
+        return {}
     results = r.json().get("results", []) or []
-
-    # Main HTML
-    main = next((res for res in results if res.get("type") != "xhr"),
-                results[0] if results else None)
-    if main:
-        target_status = main.get("status_code")
-        final_url = main.get("url")
-        content = main.get("content") or ""
-        print(f"  Target HTTP: {target_status}")
-        print(f"  Final URL:   {final_url}")
-        if isinstance(content, str):
-            print(f"  HTML length: {len(content)} chars")
-            # Save full content (for short pages; truncate long)
-            path = os.path.join(OUT_DIR, f"yiche_v6_{name}.html")
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(content)
-            print(f"  Saved → {path}")
-            # Look for inline JSON
-            if NEXT_DATA_RE.search(content):
-                m = NEXT_DATA_RE.search(content)
-                try:
-                    nd = json.loads(m.group(1))
-                    print(f"  ✅ __NEXT_DATA__ found ({len(m.group(1))} chars)")
-                    print(f"     top keys: {list(nd.keys())}")
-                    pp = nd.get("props", {}).get("pageProps", {})
-                    if pp:
-                        print(f"     pageProps: {list(pp.keys())}")
-                except Exception as e:
-                    print(f"  __NEXT_DATA__ invalid: {e}")
-            if INITIAL_STATE_RE.search(content):
-                print(f"  ✅ inline window.* JSON found")
-            # Quick scan for car-data hints
-            hints = ("seriesId", "serialId", "carId", "msrp", "price",
-                     "MasterId", "MasterName", "SerialName")
-            found_hints = [h for h in hints if h in content]
-            if found_hints:
-                print(f"  Car hints in HTML: {found_hints}")
-
-    # XHR
-    xhr_block = next((res for res in results if res.get("type") == "xhr"), None)
-    if xhr_block:
-        captured = xhr_block.get("content", []) or []
-        print(f"\n  XHR captured: {len(captured)}")
-        api_urls = []
-        for req in captured:
-            url2 = req.get("url", "") or ""
-            if any(s in url2 for s in (
-                "sentry", "google", "doubleclick", "/ads/", "/assets/",
-                "/static/", "fonts.", "apm-engine", "/log?",
-                "miaozhen", "tanx.com",
-            )):
-                continue
-            size = len(req.get("response_body") or "")
-            if size < 200:
-                continue
-            print(f"    {req.get('method')} {req.get('status_code')} "
-                  f"{size:>7}b: {url2}")
-            api_urls.append(req)
-        if api_urls:
-            save = os.path.join(OUT_DIR, f"yiche_v6_{name}_xhr.json")
-            with open(save, "w", encoding="utf-8") as f:
-                json.dump([{
-                    "url": r.get("url"),
-                    "method": r.get("method"),
-                    "status": r.get("status_code"),
-                    "response_body_preview": (r.get("response_body") or "")[:2000],
-                } for r in api_urls], f, ensure_ascii=False, indent=2)
-            print(f"  XHR saved → {save}")
+    if not results:
+        return {}
+    status = results[0].get("status_code")
+    content = results[0].get("content")
+    print(f"  Target HTTP: {status}")
+    if not isinstance(content, str):
+        print(f"  Content type: {type(content).__name__}")
+        return {"target_status": status}
+    print(f"  Size: {len(content)}")
+    print(f"  First 400 chars: {content[:400]}")
+    try:
+        j = json.loads(content)
+        if isinstance(j, dict):
+            print(f"  ✅ JSON dict, top keys: {list(j.keys())}")
+            # Check if it's the "missing params" error vs real data
+            if "data" in j and j.get("status") in ("1", 1):
+                print(f"  🎯 SUCCESS — real data returned")
+                # Print structure of data
+                data = j["data"]
+                if isinstance(data, dict):
+                    print(f"  data keys: {list(data.keys())}")
+                    # Find lists/arrays
+                    for k, v in data.items():
+                        if isinstance(v, list) and v:
+                            print(f"  data.{k}: list[{len(v)}]")
+                            if isinstance(v[0], dict):
+                                print(f"    first item keys: {list(v[0].keys())[:25]}")
+                                print(f"    sample: {json.dumps(v[0], ensure_ascii=False)[:500]}")
+                                break  # show first list only
+                elif isinstance(data, list):
+                    print(f"  data: list[{len(data)}]")
+                    if data and isinstance(data[0], dict):
+                        print(f"    first item keys: {list(data[0].keys())[:25]}")
+            return {"target_status": status, "json": j, "size": len(content)}
+    except Exception:
+        pass
+    return {"target_status": status, "size": len(content)}
 
 
 def main() -> None:
     if not OXY_USER or not OXY_PASS:
         sys.exit("ERROR: OXY_USER / OXY_PASS not set")
-    for name, url in TARGETS:
-        probe(name, url)
+
+    # A. Captured-verbatim token from v6 run (might be expired by now)
+    token_captured = ("deJcd5RjrYp42zrhxDF435XKMeaYTYeh"
+                      "&page=5JYHbABBXewrmaZsrHRka56H7Jkec6SP1778940830839")
+    probe("A_captured_token", build_url(token_captured))
+
+    # B. Fake token (does the server validate?)
+    probe("B_fake_token", build_url("test_token_123"))
+
+    # C. Empty token
+    probe("C_empty_token", build_url(""))
+
+    # D. No-token variant: bare URL with minimal param
+    minimal = f"{API_BASE}?cid=508&param=%7B%22num%22%3A20%7D"
+    probe("D_minimal_param", minimal)
+
     print("\n========== DONE ==========")
+    print("If any returned status=1 with data → API works direct, fake token OK")
 
 
 if __name__ == "__main__":
