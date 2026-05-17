@@ -32,13 +32,21 @@ def probe(page, label: str, url: str, dump_inline_json: bool = False) -> str:
     """Load URL, save full HTML, return rendered text."""
     print(f"\n========== {label}: {url} ==========")
     try:
-        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-        page.wait_for_timeout(2500)
+        page.goto(url, wait_until="load", timeout=90_000)
+        page.wait_for_timeout(3000)
     except Exception as e:
-        print(f"  EXCEPTION: {e}")
+        print(f"  goto exception (continuing): {str(e)[:200]}")
+        # Try to read whatever DID load
+        try:
+            page.wait_for_timeout(2000)
+        except Exception:
+            pass
+    try:
+        title = page.title()
+        html = page.content()
+    except Exception as e:
+        print(f"  content read failed: {e}")
         return ""
-    title = page.title()
-    html = page.content()
     print(f"  Title: {title!r}")
     print(f"  HTML size: {len(html)}")
     fname = f"specs_{label}.html"
@@ -47,7 +55,6 @@ def probe(page, label: str, url: str, dump_inline_json: bool = False) -> str:
     print(f"  Saved → recon_artifacts/{fname}")
 
     if dump_inline_json:
-        # Look for inline JSON (Nuxt 3 payload)
         m = re.search(
             r'<script[^>]*type="application/json"[^>]*>(.*?)</script>',
             html, re.DOTALL)
@@ -65,6 +72,15 @@ def probe(page, label: str, url: str, dump_inline_json: bool = False) -> str:
             except Exception:
                 pass
     return html
+
+
+def safe_eval(page, js: str, default=None):
+    """page.evaluate wrapped in try/except so script keeps going."""
+    try:
+        return page.evaluate(js)
+    except Exception as e:
+        print(f"  evaluate failed: {str(e)[:120]}")
+        return default
 
 
 def main() -> None:
@@ -91,8 +107,13 @@ def main() -> None:
         for h in hrefs[:30]:
             print(f"    {h}")
 
-        # Find brand-spec links pattern (likely /carspecs/X or /spec/X)
-        brand_links = page.evaluate(
+        # Bail-out if main page failed entirely
+        if not html or len(html) < 2000:
+            print("\n  ❌ /carspecs page didn't load — abort")
+            browser.close()
+            return
+
+        brand_links = safe_eval(page,
             """() => {
                 const out = [];
                 for (const a of document.querySelectorAll('a[href*="spec"]')) {
@@ -111,9 +132,10 @@ def main() -> None:
                     seen.add(x.href); return true;
                 });
             }""")
-        print(f"\n  All 'spec' links: {len(brand_links)}")
-        for b in brand_links[:30]:
+        print(f"\n  All 'spec' links: {len(brand_links or [])}")
+        for b in (brand_links or [])[:30]:
             print(f"    {b['text']:30} | {b['href']}")
+        brand_links = brand_links or []
 
         # ===== 2. Drill into a brand's spec page =====
         # Pick first brand with logo + spec link
@@ -131,7 +153,7 @@ def main() -> None:
         html2 = probe(page, "02_brand", brand_url, dump_inline_json=True)
 
         # Look for model links inside the brand spec page
-        model_links = page.evaluate(
+        model_links = safe_eval(page,
             """() => {
                 const out = [];
                 for (const a of document.querySelectorAll('a[href]')) {
@@ -147,9 +169,10 @@ def main() -> None:
                     seen.add(x.href); return true;
                 });
             }""")
-        print(f"\n  Inside brand page — spec-links: {len(model_links)}")
-        for m in model_links[:30]:
+        print(f"\n  Inside brand page — spec-links: {len(model_links or [])}")
+        for m in (model_links or [])[:30]:
             print(f"    {m['text']:40} | {m['href']}")
+        model_links = model_links or []
 
         # ===== 3. Drill into one model's spec page =====
         model_url = None
@@ -167,9 +190,10 @@ def main() -> None:
         else:
             html3 = probe(page, "03_model", model_url, dump_inline_json=True)
             # Print first 4KB of text to see what fields are there
-            text = page.evaluate(
-                """() => document.body.innerText.replace(/\\s+/g,' ').slice(0, 4000)""")
-            print(f"\n  Body text (first 4KB):\n  {text[:4000]}")
+            text = safe_eval(page,
+                """() => document.body.innerText.replace(/\\s+/g,' ').slice(0, 4000)""",
+                default="")
+            print(f"\n  Body text (first 4KB):\n  {text[:4000] if text else '(empty)'}")
 
         browser.close()
     print("\nDONE")
