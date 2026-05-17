@@ -86,28 +86,20 @@ def build_detail_url(meta: dict, source_id: str) -> str:
 
 
 def extract_detail_js() -> str:
-    """JS that pulls everything we need from the detail page."""
+    """JS that pulls everything we need from the detail page using strict regex."""
     return r"""() => {
         const text = (document.body.innerText || '').replace(/[ \t]+/g, ' ');
-        const lines = text.split('\n').map(s => s.trim()).filter(Boolean);
 
-        // Find specific labelled values
-        const findAfter = (label) => {
-            for (let i = 0; i < lines.length; i++) {
-                if (lines[i] === label || lines[i].startsWith(label + ' ')) {
-                    if (lines[i].length > label.length + 1) {
-                        return lines[i].substring(label.length).trim();
-                    }
-                    if (i + 1 < lines.length) return lines[i + 1];
-                }
-            }
-            return null;
+        // Strict regex extractors: capture just the value, not the next label
+        const get = (re) => {
+            const m = text.match(re);
+            return m ? m[1].trim() : null;
         };
 
-        // All H1 / title
+        // Title
         const title = (document.querySelector('h1, .car-title')?.innerText || '').trim();
 
-        // Image URLs (real photos, not icons)
+        // Images — real photos only
         const images = Array.from(document.querySelectorAll('img'))
             .map(i => i.src)
             .filter(s => s && /\.(jpe?g|png|webp)/i.test(s)
@@ -115,72 +107,80 @@ def extract_detail_js() -> str:
                           && !s.includes('rule-traffic-light')
                           && !s.includes('logo'));
 
-        // Prices: $X,XXX (export) and MSRP ¥X,XXX (Chinese factory)
+        // Prices: $X,XXX (export) and MSRP ¥X,XXX
         let export_usd = null, msrp_cny = null;
-        const usdMatch = text.match(/\$\s*([\d,]+)/);
+        const usdMatch = text.match(/\$\s*([\d,]+)\b/);
         if (usdMatch) export_usd = parseInt(usdMatch[1].replace(/,/g, ''), 10);
         const cnyMatch = text.match(/MSRP[^\d]*¥\s*([\d,]+)/);
         if (cnyMatch) msrp_cny = parseInt(cnyMatch[1].replace(/,/g, ''), 10);
 
-        // Description block (between "Description" and "Contact your AutoCango")
+        // Description: between "Description" and "Contact your AutoCango"
         let description = '';
         const descStart = text.indexOf('Description');
         const descEnd = text.indexOf('Contact your AutoCango');
         if (descStart > 0 && descEnd > descStart) {
-            description = text.substring(descStart + 'Description'.length, descEnd).trim();
+            description = text.substring(descStart + 11, descEnd).trim()
+                .replace(/Availability Check：[^\n]+/, '')
+                .replace(/Condition：/g, '').trim();
         }
 
-        // Accessories list (between "Accessories" and "Relevant Car Specs"/"Spec")
+        // Accessories: between "Accessories" and "Relevant Car Specs"
         let accessories = [];
         const accStart = text.indexOf('Accessories');
-        const accEnd = Math.min(
-            ...['Relevant Car Specs', 'Vehicle Specs', 'Brand'].map(s => {
-                const idx = text.indexOf(s, accStart + 12);
-                return idx > 0 ? idx : 999999;
-            })
-        );
-        if (accStart > 0 && accEnd < text.length) {
-            accessories = text.substring(accStart + 'Accessories'.length, accEnd)
-                .split('\n').map(s => s.trim()).filter(Boolean);
+        const accEnd = text.indexOf('Relevant Car Specs');
+        if (accStart > 0 && accEnd > accStart) {
+            accessories = text.substring(accStart + 11, accEnd)
+                .split('\n').map(s => s.trim())
+                .filter(s => s && s.length < 50);
         }
 
-        // City (often appears on detail page near body or in breadcrumb)
-        const cityMatch = text.match(/\b([A-Z][a-z]+)\s+(?:[A-Z][a-z]+\s+)?China\b/);
+        // City: usually in breadcrumb or "City Province China" near top
+        const cityMatch = text.match(/\b([A-Z][a-z]+(?: [A-Z][a-z]+)?)\s+(?:Anhui|Beijing|Chongqing|Fujian|Gansu|Guangdong|Guangxi|Guizhou|Hainan|Hebei|Heilongjiang|Henan|Hubei|Hunan|Jiangsu|Jiangxi|Jilin|Liaoning|Ningxia|Qinghai|Shaanxi|Shandong|Shanghai|Shanxi|Sichuan|Tianjin|Xinjiang|Tibet|Yunnan|Zhejiang)\s+China\b/);
         const city = cityMatch ? cityMatch[1] : null;
 
         return {
             title,
-            text_full: text.slice(0, 6000),
             images: images.slice(0, 30),
             export_usd, msrp_cny,
-            description: description.slice(0, 5000),
-            accessories: accessories.slice(0, 60),
+            description: description.slice(0, 4000),
+            accessories: accessories.slice(0, 50),
             city,
-            // Specific labelled fields
-            ref_id: findAfter('Ref ID'),
-            steering: findAfter('Steering'),
-            model_code: findAfter('Model Code'),
-            body_type: findAfter('Body Type'),
-            model_year: findAfter('Model Year'),
-            mileage: findAfter('Mlg(km)'),
-            color: findAfter('Exterior Color'),
-            fuel: findAfter('Fuel'),
-            engine: findAfter('Engine'),
-            transmission: findAfter('Transmission'),
-            drivetrain: findAfter('Drivetrain'),
-            battery_cap: findAfter('Batt.Cap.(kWh)'),
-            range_km: findAfter('Range(km)'),
-            motor_power: findAfter('Motor Power(kW)'),
-            seats: findAfter('Seats'),
-            doors: findAfter('Doors'),
-            dimensions: findAfter('Dim.(mm)'),
-            volume_m3: findAfter('M³'),
-            weight_kg: findAfter('Weight(kg)'),
-            max_cap_kg: findAfter('Max.Cap(kg)'),
-            brand: findAfter('Brand'),
-            series: findAfter('Series'),
-            engine_cc: findAfter('Engine(cc)'),
-            reg_year_month: findAfter('Reg. Year'),
+
+            // Single-word / single-token fields — strict regex stops at whitespace
+            ref_id:        get(/Ref ID\s+([A-Z0-9]+)/),
+            steering:      get(/Steering\s+(Left|Right)/),
+            model_code:    get(/Model Code\s+(\S+)/),
+            body_type:     get(/Body Type\s+([A-Za-z\/-]+)/),
+            color:         get(/Exterior Color\s+([A-Za-z]+)/),
+            fuel:          get(/Fuel\s+([A-Za-z]+)/),
+            transmission:  get(/Transmission\s+([A-Za-z\-]+)/),
+            drivetrain:    get(/Drivetrain\s+([A-Za-z0-9]+)/),
+
+            // Numeric fields — strict digits only
+            model_year:    get(/Model Year\s+(\d{4})/),
+            mileage:       get(/Mlg\(km\)\s+([\d,]+)/),
+            engine_cc:     get(/Engine\(cc\)\s+(\d+|-)/),
+            seats:         get(/Seats\s+(\d+)/),
+            doors:         get(/Doors\s+(\d+)/),
+            weight_kg:     get(/Weight\(kg\)\s+(\d+|-)/),
+            max_cap_kg:    get(/Max\.Cap\(kg\)\s+(\d+|-)/),
+            battery_cap:   get(/Batt\.Cap\.\(kWh\)\s+([\d.]+|-)/),
+            range_km:      get(/Range\(km\)\s+(\d+|-)/),
+            motor_power:   get(/Motor Power\(kW\)\s+(\d+|-)/),
+
+            // Composite fields needing more lenient parse
+            // "Reg. Year 2019-06" — capture YYYY-MM
+            reg_year_month: get(/Reg\.\s*Year\s+(\d{4}-\d{1,2})/),
+            // "Engine 2.0T 201HP L4" — keep as-is
+            engine:        get(/Engine\s+(\d+\.\d+[TL]\s+\d+HP\s+L\d+)/),
+            // "Dim.(mm) 4810*1910*1770"
+            dimensions:    get(/Dim\.\(mm\)\s+(\d+\*\d+\*\d+)/),
+            // "M³ 16.27"
+            volume_m3:     get(/M³\s+([\d.]+|-)/),
+            // "Brand GAC Trumpchi" — multi-word until "Series"
+            brand:         get(/\bBrand\s+([A-Z][A-Za-z\- ]+?)\s+Series\b/),
+            // "Series GS8" — single token usually
+            series:        get(/\bSeries\s+([A-Za-z0-9 .\-]+?)\s+(?:Model Year|Engine)/),
         };
     }"""
 
