@@ -2,6 +2,8 @@
 
 Парсер объявлений с южнокорейского классифайда [encar.com](https://www.encar.com). Те же поля что у dongchedi + **VIN** и история ДТП. Используется тот же multi-source schema в Supabase.
 
+**С мая 2026** работает через прямые HTTP-запросы к `api.encar.com` (Oxylabs больше не нужен).
+
 ---
 
 ## Содержание
@@ -24,13 +26,13 @@
 ```
 ┌────────────────────────────────────────────────────────────┐
 │ Шаг 1: collect_encar.py                                    │
-│   GET car.encar.com/list/car?page=N&search=...             │
-│   render=html, 1 страница = ~250 машин                     │
-│   Из __NEXT_DATA__:                                        │
-│     props.pageProps.initialState.ryvussApi.queries.*       │
-│     getCarNormal (200) + Preferential (40) + Premium (10)  │
+│   GET api.encar.com/search/car/list/general                │
+│       ?q=(And.Hidden.N._.CarType.A.)                       │
+│       &sr=|MobileModifiedDate|offset|200                   │
+│   Прямой HTTP, до 200 машин за batch                       │
+│   Пагинация offset 0, 200, 400, … (4 в параллель)          │
 │        ↓                                                   │
-│   pending_ids (Supabase) — 28 полей в metadata             │
+│   pending_ids (Supabase) — SearchResults поля в metadata   │
 └────────────────────────────────────────────────────────────┘
         ↓
 ┌────────────────────────────────────────────────────────────┐
@@ -38,26 +40,39 @@
 │   GET api.encar.com/v1/readside/vehicles                   │
 │       ?vehicleIds=ID1,ID2,ID3,ID4,ID5                      │
 │       &include=SPEC,ADVERTISEMENT,PHOTOS,...               │
-│   БЕЗ render → $0.002 за batch из 5 машин                  │
+│   Прямой HTTP, batch до 5 машин                            │
 │        ↓                                                   │
 │   cars (Supabase) с VIN + опциями + фото + описанием       │
 └────────────────────────────────────────────────────────────┘
 ```
 
+**Без Oxylabs, без render-браузера.** api.encar.com открыт для любого IP, мы дёргаем напрямую через `requests.get()`.
+
 ---
 
 ## Откуда берутся данные
 
-### Шаг 1 — листинг (`car.encar.com/list/car`)
+### Шаг 1 — листинг (`api.encar.com/search/car/list/general`)
 
-Encar построен на Next.js. Открываем страницу через Oxylabs `render=html`, извлекаем `<script id="__NEXT_DATA__">…</script>`. Внутри JSON-структура:
+Внутренний search API Encar открыт без авторизации. Хитим напрямую:
 
 ```
-props.pageProps.initialState.ryvussApi.queries.<функция>(<JSON-аргументы>)
-  .data.SearchResults  →  список машин
+GET https://api.encar.com/search/car/list/general
+    ?count=true
+    &q=(And.Hidden.N._.CarType.A.)
+    &sr=|MobileModifiedDate|<offset>|<limit>
 ```
 
-На одной странице 3 раздела (объединяем все):
+Параметры:
+- `q` — фильтр DSL (`Hidden.N` = не скрытые, `CarType.A` = все типы)
+- `sr` — sort spec: `|поле|offset|limit`
+  - `MobileModifiedDate` — сортировка по дате последнего обновления (новые первыми)
+  - offset 0, 200, 400, …
+  - limit до 200
+
+Ответ — чистый JSON `{"SearchResults": [...], "Count": N, ...}`. До прямого API мы парсили `car.encar.com/list/car` HTML через render+`__NEXT_DATA__`, но в мае 2026 переехали на API (быстрее, дешевле, проще).
+
+Каждая страница раньше делила машины на 3 секции (на одной странице 3 раздела через __NEXT_DATA__):
 
 | Раздел | Кол-во | Что |
 |---|---|---|
@@ -247,17 +262,15 @@ poisk_avto/
 2. `python collect_encar.py …` — собрать новые ID
 3. `python scrape_encar.py …` — спарсить карточки через API
 
-**Secrets** (те же что у dongchedi):
-- `OXY_USER`, `OXY_PASS` — Oxylabs
+**Secrets:**
 - `SUPABASE_URL`, `SUPABASE_KEY` — service_role JWT
+- (Oxylabs больше не нужен — снято в мае 2026)
 
 ---
 
 ## Локальный запуск
 
 ```bash
-export OXY_USER="..."
-export OXY_PASS="..."
 export SUPABASE_URL="https://pdmbdclhqiqyoomeswxs.supabase.co"
 export SUPABASE_KEY="..."
 
@@ -272,15 +285,15 @@ python scrape_encar.py --limit 250 --workers 5
 
 ## Стоимость
 
-| Операция | Цена | Что |
-|---|---|---|
-| 1 страница листинга | $0.04 | 250 машин (render=html) |
-| 1 batch карточек (5 машин) | $0.002 | API без render |
-| Bootstrap 2500 машин | **$1.40** | 10 страниц + 500 batch'ей |
-| Daily refresh новых ~500/день | **$0.30** | 2 страницы + 100 batch'ей |
-| Месячный бюджет (daily cron) | **~$10** | 30 дней |
+**$0/мес.** Прямые HTTP-запросы, не используем ни Oxylabs ни сторонние прокси.
 
-**В 30 раз дешевле dongchedi** на ту же базу. Главная причина — публичный API без render.
+| | Старое (Oxylabs) | Новое (direct HTTP) |
+|---|---|---|
+| 1 страница (200 машин) | $0.04 | **$0** |
+| 1 batch (5 карточек) | $0.002 | **$0** |
+| Месяц | ~$10 | **$0** |
+
+GitHub Actions runner-time бесплатно укладывается в free tier (2000 мин/мес).
 
 ---
 
@@ -304,4 +317,5 @@ python scrape_encar.py --limit 250 --workers 5
 3. **`fem.encar.com/cars/detail/{Id}`** — React-приложение, в HTML данных нет, всё через XHR.
 4. **`api.encar.com/v1/readside/vehicles?...`** — публичный JSON-эндпоинт, поддерживает batch до 5 ID.
 5. **VIN, опции, ДТП, фото, описание** — всё в одном API-ответе.
+6. **(май 2026) `api.encar.com` доступен напрямую с любого IP** без Oxylabs — мигрировали на direct HTTP, сэкономили $10/мес и упростили код.
 6. **API работает без render** через Oxylabs — $0.002 вместо $0.04 за запрос.
