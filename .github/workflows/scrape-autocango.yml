@@ -1,0 +1,58 @@
+name: Scrape AutoCango
+
+on:
+  schedule:
+    # Daily 21:00 UTC = 05:00 Beijing (next day).
+    - cron: '0 21 * * *'
+  workflow_dispatch:
+    inputs:
+      pages:
+        description: 'Listing pages to collect (~30 cars each)'
+        required: false
+        default: '10'
+      min_year:
+        description: 'Skip cars with model_year < this (0 = no filter)'
+        required: false
+        default: '0'
+      collect_limit:
+        description: 'Max new IDs to upsert'
+        required: false
+        default: '5000'
+      scrape_limit:
+        description: 'Max cards to scrape this run'
+        required: false
+        default: '300'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps + playwright chromium
+        run: |
+          pip install -r requirements-scrapling.txt
+          python -m playwright install chromium --with-deps
+
+      - name: Collect listing IDs
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python collect_autocango.py \
+            --pages    ${{ inputs.pages         || 10 }} \
+            --min-year ${{ inputs.min_year      || 0 }} \
+            --limit    ${{ inputs.collect_limit || 5000 }}
+
+      - name: Scrape detail pages
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python scrape_autocango.py \
+            --limit ${{ inputs.scrape_limit || 300 }}
