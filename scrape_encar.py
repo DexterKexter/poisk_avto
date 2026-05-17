@@ -45,6 +45,8 @@ SOURCE_LANGUAGE = "ko"
 PRICE_CURRENCY = "KRW"
 KM_AGE_UNIT = "km"
 IMAGE_BASE = "https://ci.encar.com"
+# Encar serves Full HD when we append this impolicy. Without it photos are 640×360.
+IMAGE_HD_QS = "?impolicy=heightRate&rh=1080&cw=1920&ch=1080&cg=Center"
 CARD_URL_TPL = "https://fem.encar.com/cars/detail/{id}"
 
 API_URL = "https://api.encar.com/v1/readside/vehicles"
@@ -176,7 +178,7 @@ def parse_car(api_car: dict) -> dict | None:
         address = contact.get("address", "") or ""
         region_kr = address.split(" ")[0] if address else ""
 
-        image_urls = [f"{IMAGE_BASE}{p['path']}" for p in photos
+        image_urls = [f"{IMAGE_BASE}{p['path']}{IMAGE_HD_QS}" for p in photos
                       if isinstance(p, dict) and p.get("path")]
 
         dealer = partnership.get("dealer") or {}
