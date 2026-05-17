@@ -1,15 +1,24 @@
 """
-Autocango.com listing ID collector — playwright + DOM scraping.
+Autocango.com listing ID collector — quality filter strategy.
 
-autocango.com is a Chinese new+used car export platform. WAF blocks
-direct HTTP, but headless Chromium passes. We open
-  https://www.autocango.com/usedcar/excludeSold=true/page=N
-extract div.car-item, save the visible fields + href to pending_ids.
+For KZ-import use case we iterate over the top 6 Chinese export-hub
+cities, applying filters that pre-screen for quality:
+  - originalPaint=22   (Original Paint tab — verified no repaint)
+  - minPrice=$5000     (cuts true junk: ex-taxis, salvage)
+  - minModelYear=2021  (within China's 180-day rule horizon)
+  - excludeSold=true   (only available)
+  - sort=6             (newest listings first)
 
-~30 cars per page, ~$0 per request (GitHub Actions free tier).
+Cities (with PRC administrative codes):
+  Shanghai     province=310000 city=310100
+  Guangzhou    province=440000 city=440100
+  Shenzhen     province=440000 city=440300
+  Beijing      province=110000 city=110100
+  Tianjin      province=120000 city=120100
+  Chengdu      province=510000 city=510100
 
 Usage:
-    python collect_autocango.py --pages 10 --min-year 0 --limit 5000
+    python collect_autocango.py --pages-per-city 20 --limit 10000
 
 Env: SUPABASE_URL, SUPABASE_KEY
 """
@@ -30,18 +39,41 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/131.0.0.0 Safari/537.36")
 
+# Top 6 Chinese export hubs.
+# province_id and city_id are PRC administrative codes
+# (same scheme as dongchedi uses).
+CITIES = {
+    "Shanghai":  {"province_id": 310000, "city_id": 310100},
+    "Guangzhou": {"province_id": 440000, "city_id": 440100},
+    "Shenzhen":  {"province_id": 440000, "city_id": 440300},
+    "Beijing":   {"province_id": 110000, "city_id": 110100},
+    "Tianjin":   {"province_id": 120000, "city_id": 120100},
+    "Chengdu":   {"province_id": 510000, "city_id": 510100},
+}
 
-def build_listing_url(page_num: int, exclude_sold: bool = True) -> str:
+
+def build_listing_url(city_key: str, page_num: int,
+                      min_price: int, min_year: int,
+                      original_paint: int, exclude_sold: bool) -> str:
+    """Build URL: filter segments + cityId + pagination."""
+    city = CITIES[city_key]
     parts = ["usedcar"]
+    parts.append(f"minPrice={min_price}")
+    parts.append(f"minModelYear={min_year}")
+    parts.append("country=China")
+    parts.append(f"provinceId={city['province_id']}")
+    parts.append(f"cityId={city['city_id']}")
+    parts.append("sort=6")
     if exclude_sold:
         parts.append("excludeSold=true")
+    parts.append(f"originalPaint={original_paint}")
     if page_num > 1:
         parts.append(f"page={page_num}")
     return f"{BASE_URL}/" + "/".join(parts)
 
 
 def extract_cars_js() -> str:
-    """JS that extracts all cars from current page."""
+    """JS that pulls car-items from current rendered page."""
     return r"""() => {
         const cards = Array.from(document.querySelectorAll('div.car-item'));
         return cards.map(card => {
@@ -50,7 +82,6 @@ def extract_cars_js() -> str:
             const idMatch = href ? href.match(/[A-Z]{2,4}\d{6,10}/) : null;
             const id = idMatch ? idMatch[0] : null;
 
-            // url-slug pieces (brand-model) from /sku/usedcar-Brand-Model-ID
             let brand_slug = null, model_slug = null, type_slug = null;
             if (href) {
                 const m = href.match(/\/sku\/(newcar|usedcar)-(.+?)-([A-Z]{2,4}\d{6,10})/);
@@ -66,7 +97,6 @@ def extract_cars_js() -> str:
                 .map(i => i.src).filter(s => s && !s.startsWith('data:'));
             const text = (card.innerText || '').replace(/\s+/g, ' ').trim();
 
-            // Extract price: $X,XXX usually appears as standalone in card
             let price_usd = null;
             const priceMatch = text.match(/\$([\d,]+)/);
             if (priceMatch) price_usd = parseInt(priceMatch[1].replace(/,/g, ''), 10);
@@ -82,63 +112,66 @@ def extract_cars_js() -> str:
 
 
 def parse_text_fields(text: str) -> dict:
-    """Extract structured fields from card.innerText."""
     out: dict[str, Any] = {}
-
     m = re.search(r'Reg\.\s*Year\s*(\d{4})-(\d{1,2})', text)
     if m:
         out["reg_year"] = int(m.group(1))
         out["reg_month"] = int(m.group(2))
-
     m = re.search(r'Model Year\s*(\d{4})', text)
     if m:
         out["model_year"] = int(m.group(1))
-
     m = re.search(r'Mlg\(km\)\s*([\d,]+)', text)
     if m:
         out["mileage_km"] = int(m.group(1).replace(",", ""))
-
     m = re.search(r'Fuel\s*(\S+)', text)
     if m:
         out["fuel"] = m.group(1).strip()
-
     m = re.search(r'Engine\(cc\)\s*([\d-]+)', text)
     if m and m.group(1) != "-":
         out["engine_cc"] = int(m.group(1))
-
     m = re.search(r'Transm\.\s*(\S+)', text)
     if m:
         out["transmission"] = m.group(1).strip()
-
     m = re.search(r'Exterior Color\s*(\S+)', text)
     if m:
         out["color"] = m.group(1).strip()
-
     m = re.search(r'Steering\s*(\S+)', text)
     if m:
         out["steering"] = m.group(1).strip()
-
     out["compliant_180day"] = "180-Day Rule Compliant" in text
-
     return out
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pages", type=int, default=10,
-                    help="How many listing pages to fetch (~30 cars each)")
-    ap.add_argument("--min-year", type=int, default=0,
-                    help="Skip cars with model_year < this (0 = no filter)")
-    ap.add_argument("--limit", type=int, default=5000)
+    ap.add_argument("--cities", type=str, default=",".join(CITIES.keys()),
+                    help="Comma-separated city keys")
+    ap.add_argument("--pages-per-city", type=int, default=20,
+                    help="Max listing pages to fetch per city")
+    ap.add_argument("--min-price", type=int, default=5000,
+                    help="Minimum price in USD")
+    ap.add_argument("--min-year", type=int, default=2021,
+                    help="Minimum model year")
+    ap.add_argument("--original-paint", type=int, default=22,
+                    help="Original-paint tab code (22 = strict)")
     ap.add_argument("--exclude-sold", type=bool, default=True)
+    ap.add_argument("--limit", type=int, default=10000,
+                    help="Max new IDs total")
     args = ap.parse_args()
+
+    cities = [c.strip() for c in args.cities.split(",") if c.strip()]
+    bad = [c for c in cities if c not in CITIES]
+    if bad:
+        sys.exit(f"Unknown cities: {bad}. Available: {list(CITIES.keys())}")
 
     from playwright.sync_api import sync_playwright
 
     print(f"Backend: {DB.backend_name()}")
     print(f"Source: {SOURCE}")
-    print(f"Pages: {args.pages} × ~30 = up to {args.pages * 30}")
-    print(f"Filters: min_year={args.min_year}, exclude_sold={args.exclude_sold}\n")
+    print(f"Cities ({len(cities)}): {cities}")
+    print(f"Filters: minPrice={args.min_price}, minYear={args.min_year}, "
+          f"originalPaint={args.original_paint}, excludeSold={args.exclude_sold}")
+    print(f"Pages per city: {args.pages_per_city}\n")
 
     print("Loading known IDs cache…")
     known = set()
@@ -168,32 +201,38 @@ def main() -> None:
         )
         page = ctx.new_page()
 
-        for n in range(1, args.pages + 1):
-            url = build_listing_url(n, args.exclude_sold)
-            try:
-                page.goto(url, wait_until="networkidle", timeout=60_000)
-                page.wait_for_timeout(1500)
-                cars = page.evaluate(extract_cars_js())
-            except Exception as e:
-                print(f"  [page {n}] EXCEPTION: {e}")
-                continue
-            new_on_page = 0
-            for car in cars:
-                cid = car.get("id")
-                if cid and cid not in all_cars:
-                    all_cars[cid] = car
-                    new_on_page += 1
-            elapsed = int(time.time() - started)
-            print(f"  [page {n}] {len(cars)} cars ({new_on_page} new), "
-                  f"total unique: {len(all_cars)}, elapsed {elapsed}s")
-            if new_on_page == 0 and n > 1:
-                # Pagination exhausted
-                print(f"  no new cars on page {n} — stopping")
-                break
+        for city in cities:
+            print(f"\n=== {city} ===")
+            cars_in_city = 0
+            for n in range(1, args.pages_per_city + 1):
+                url = build_listing_url(city, n,
+                                         args.min_price, args.min_year,
+                                         args.original_paint,
+                                         args.exclude_sold)
+                try:
+                    page.goto(url, wait_until="networkidle", timeout=60_000)
+                    page.wait_for_timeout(1200)
+                    cars = page.evaluate(extract_cars_js())
+                except Exception as e:
+                    print(f"  [{city} p{n}] EXCEPTION: {e}")
+                    continue
+                new_on_page = 0
+                for car in cars:
+                    cid = car.get("id")
+                    if cid and cid not in all_cars:
+                        all_cars[cid] = {**car, "source_city": city}
+                        new_on_page += 1
+                cars_in_city += len(cars)
+                elapsed = int(time.time() - started)
+                print(f"  [{city} p{n}] {len(cars)} cars ({new_on_page} new) "
+                      f"| total unique: {len(all_cars)} | {elapsed}s")
+                if len(cars) == 0:
+                    print(f"  [{city}] no cars on page {n} — moving to next city")
+                    break
 
         browser.close()
 
-    print(f"\nTotal unique cars: {len(all_cars)}")
+    print(f"\nTotal unique cars across all cities: {len(all_cars)}")
 
     skipped_known = skipped_old = 0
     to_save: list[tuple[str, dict]] = []
@@ -213,13 +252,14 @@ def main() -> None:
             "model_slug": car.get("model_slug"),
             "images": car.get("images"),
             "price_usd": car.get("price_usd"),
+            "source_city": car.get("source_city"),
             **fields,
         }
         to_save.append((cid, metadata))
 
-    print(f"  already in DB: {skipped_known}")
-    print(f"  too old: {skipped_old}")
-    print(f"  to save: {len(to_save)}")
+    print(f"  already in DB:    {skipped_known}")
+    print(f"  too old (<{args.min_year}): {skipped_old}")
+    print(f"  to save:          {len(to_save)}")
 
     saved = 0
     for cid, meta in to_save:

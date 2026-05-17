@@ -6,27 +6,39 @@ on:
     - cron: '0 21 * * *'
   workflow_dispatch:
     inputs:
-      pages:
-        description: 'Listing pages to collect (~30 cars each)'
+      cities:
+        description: 'Cities (comma-separated)'
         required: false
-        default: '10'
+        default: 'Shanghai,Guangzhou,Shenzhen,Beijing,Tianjin,Chengdu'
+      pages_per_city:
+        description: 'Max listing pages per city'
+        required: false
+        default: '20'
+      min_price:
+        description: 'Minimum price in USD'
+        required: false
+        default: '5000'
       min_year:
-        description: 'Skip cars with model_year < this (0 = no filter)'
+        description: 'Minimum model year'
         required: false
-        default: '0'
+        default: '2021'
+      original_paint:
+        description: 'Original-paint tab code (22 = strict)'
+        required: false
+        default: '22'
       collect_limit:
-        description: 'Max new IDs to upsert'
+        description: 'Max new IDs to upsert this run'
         required: false
         default: '5000'
       scrape_limit:
-        description: 'Max cards to scrape this run'
+        description: 'Max detail pages to scrape this run'
         required: false
-        default: '300'
+        default: '500'
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -34,25 +46,27 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install deps + playwright chromium
+      - name: Install deps + playwright
         run: |
           pip install -r requirements-scrapling.txt
           python -m playwright install chromium --with-deps
 
-      - name: Collect listing IDs
+      - name: Collect quality listings (6 cities + filters)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           python collect_autocango.py \
-            --pages    ${{ inputs.pages         || 10 }} \
-            --min-year ${{ inputs.min_year      || 0 }} \
-            --limit    ${{ inputs.collect_limit || 5000 }}
+            --cities         "${{ inputs.cities         || 'Shanghai,Guangzhou,Shenzhen,Beijing,Tianjin,Chengdu' }}" \
+            --pages-per-city ${{ inputs.pages_per_city || 20 }} \
+            --min-price      ${{ inputs.min_price      || 5000 }} \
+            --min-year       ${{ inputs.min_year       || 2021 }} \
+            --original-paint ${{ inputs.original_paint || 22 }} \
+            --limit          ${{ inputs.collect_limit  || 5000 }}
 
-      - name: Scrape detail pages
+      - name: Scrape detail pages (full-res photos)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
-          python scrape_autocango.py \
-            --limit ${{ inputs.scrape_limit || 300 }}
+          python scrape_autocango.py --limit ${{ inputs.scrape_limit || 500 }}

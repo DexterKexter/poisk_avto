@@ -99,13 +99,16 @@ def extract_detail_js() -> str:
         // Title
         const title = (document.querySelector('h1, .car-title')?.innerText || '').trim();
 
-        // Images — real photos only
+        // Images — real photos only. Strip aliyun's x-image-process query
+        // so we get full-resolution originals (not the 900px thumbnails).
         const images = Array.from(document.querySelectorAll('img'))
             .map(i => i.src)
             .filter(s => s && /\.(jpe?g|png|webp)/i.test(s)
                           && !s.startsWith('data:')
                           && !s.includes('rule-traffic-light')
-                          && !s.includes('logo'));
+                          && !s.includes('logo'))
+            // Drop ?x-image-process=... — gives full-res original
+            .map(s => s.split('?')[0]);
 
         // Prices: $X,XXX (export) and MSRP ¥X,XXX
         let export_usd = null, msrp_cny = null;
