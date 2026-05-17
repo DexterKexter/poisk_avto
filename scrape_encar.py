@@ -1,6 +1,7 @@
 """
-Encar.com card scraper — hits the public API directly (no render needed).
+Encar.com card scraper — DIRECT HTTP (no Oxylabs).
 
+Tests confirmed api.encar.com is reachable from any IP without proxy.
 For each pending ID, calls:
     GET https://api.encar.com/v1/readside/vehicles
         ?vehicleIds=ID1,ID2,ID3,ID4,ID5
@@ -8,13 +9,12 @@ For each pending ID, calls:
                  OPTIONS,CONDITION,PARTNERSHIP,CONTENTS,VEHICLETYPE
 
 Returns JSON list of 5 cars with full detail (VIN, options, photos, etc).
-Direct API call costs ~$0.002 each through Oxylabs vs $0.04 with render —
-20x cheaper than a render-based scrape.
+Cost: $0 per request (direct HTTP, no proxy).
 
 Usage:
     python scrape_encar.py --limit 500 --workers 5
 
-Env: OXY_USER, OXY_PASS, SUPABASE_URL, SUPABASE_KEY
+Env: SUPABASE_URL, SUPABASE_KEY
 """
 
 import argparse
@@ -29,11 +29,18 @@ import requests
 
 import db as DB
 
-OXY_USER = os.environ.get("OXY_USER", "")
-OXY_PASS = os.environ.get("OXY_PASS", "")
-OXY_URL = "https://realtime.oxylabs.io/v1/queries"
-
 SOURCE = "encar"
+
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+      "AppleWebKit/537.36 (KHTML, like Gecko) "
+      "Chrome/131.0.0.0 Safari/537.36")
+HEADERS = {
+    "User-Agent": UA,
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9,ko;q=0.8",
+    "Referer": "https://fem.encar.com/",
+}
+
 SOURCE_LANGUAGE = "ko"
 PRICE_CURRENCY = "KRW"
 KM_AGE_UNIT = "km"
@@ -105,31 +112,13 @@ def tr(value: str, mapping: dict) -> str:
 # ---------- API fetch ----------
 
 def fetch_batch(ids: list[str]) -> list[dict] | None:
-    """Fetch up to 5 cars via direct API. Returns list of car dicts or None on error."""
-    if not OXY_USER or not OXY_PASS:
-        sys.exit("ERROR: set OXY_USER and OXY_PASS")
+    """Fetch up to 5 cars via direct HTTP. Returns list of car dicts or None."""
     url = f"{API_URL}?vehicleIds={','.join(ids)}&include={INCLUDES}"
-    payload = {
-        "source": "universal",
-        "url": url,
-        "geo_location": "South Korea",
-    }
     try:
-        r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
-                          json=payload, timeout=120)
+        r = requests.get(url, headers=HEADERS, timeout=30)
         if r.status_code != 200:
             return None
-        results = r.json().get("results", []) or []
-        if not results:
-            return None
-        if results[0].get("status_code") != 200:
-            return None
-        content = results[0].get("content")
-        if isinstance(content, str):
-            try:
-                content = json.loads(content)
-            except json.JSONDecodeError:
-                return None
+        content = r.json()
         if isinstance(content, list):
             return content
         return None

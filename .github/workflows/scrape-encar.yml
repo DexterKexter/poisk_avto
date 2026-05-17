@@ -47,8 +47,6 @@ jobs:
 
       - name: Collect IDs (encar listing pagination)
         env:
-          OXY_USER: ${{ secrets.OXY_USER }}
-          OXY_PASS: ${{ secrets.OXY_PASS }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
@@ -60,8 +58,6 @@ jobs:
 
       - name: Scrape pending cards (batched API)
         env:
-          OXY_USER: ${{ secrets.OXY_USER }}
-          OXY_PASS: ${{ secrets.OXY_PASS }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |

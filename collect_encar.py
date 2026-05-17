@@ -1,18 +1,14 @@
 """
-Encar.com listing ID collector — direct API mode.
+Encar.com listing ID collector — DIRECT HTTP (no Oxylabs).
 
-Hits api.encar.com/search/car/list/general?q=...&sr=|sort|offset|limit
-WITHOUT render (just a plain HTTP request through Oxylabs). Returns the
-SearchResults array as JSON. Same fields as the HTML __NEXT_DATA__
-listing (Id, Manufacturer, Model, Year, Price, Mileage, Photos, …) but:
-  - ~$0.002 per request instead of $0.04 (no render needed)
-  - clean offset-based pagination (no duplicates)
-  - up to 200 cars per request
+Tests confirmed api.encar.com is reachable from any IP without Oxylabs
+proxy. Hits api.encar.com/search/car/list/general directly with
+requests.get(). Same SearchResults as before but $0 per request.
 
 Usage:
     python collect_encar.py --pages 10 --page-size 200 --min-year 0
 
-Env: OXY_USER, OXY_PASS, SUPABASE_URL, SUPABASE_KEY
+Env: SUPABASE_URL, SUPABASE_KEY
 """
 
 import argparse
@@ -28,15 +24,21 @@ import requests
 
 import db as DB
 
-OXY_USER = os.environ.get("OXY_USER", "")
-OXY_PASS = os.environ.get("OXY_PASS", "")
-OXY_URL = "https://realtime.oxylabs.io/v1/queries"
-
 SOURCE = "encar"
 DEFAULT_ACTION = "(And.Hidden.N._.CarType.A.)"  # all car types, not hidden
 DEFAULT_SORT = "MobileModifiedDate"             # newest activity first
 
 API_BASE = "https://api.encar.com/search/car/list/general"
+
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+      "AppleWebKit/537.36 (KHTML, like Gecko) "
+      "Chrome/131.0.0.0 Safari/537.36")
+HEADERS = {
+    "User-Agent": UA,
+    "Accept": "application/json",
+    "Accept-Language": "en-US,en;q=0.9,ko;q=0.8",
+    "Referer": "https://car.encar.com/",
+}
 
 
 def build_api_url(offset: int, limit: int,
@@ -52,34 +54,14 @@ def build_api_url(offset: int, limit: int,
 
 
 def fetch_batch(offset: int, limit: int) -> tuple[int, list[dict]]:
-    """Fetch one batch via direct API. Returns (offset, list_of_cars)."""
-    if not OXY_USER or not OXY_PASS:
-        sys.exit("ERROR: set OXY_USER and OXY_PASS")
+    """Fetch one batch via direct HTTP. Returns (offset, list_of_cars)."""
     url = build_api_url(offset, limit)
-    payload = {
-        "source": "universal",
-        "url": url,
-        "geo_location": "South Korea",
-        # NO render — direct API call
-    }
     try:
-        r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
-                          json=payload, timeout=120)
+        r = requests.get(url, headers=HEADERS, timeout=30)
         if r.status_code != 200:
-            print(f"  [offset {offset}] OXY HTTP {r.status_code}: {r.text[:120]}")
+            print(f"  [offset {offset}] HTTP {r.status_code}: {r.text[:120]}")
             return (offset, [])
-        results = r.json().get("results", []) or []
-        if not results:
-            return (offset, [])
-        if results[0].get("status_code") != 200:
-            print(f"  [offset {offset}] target HTTP {results[0].get('status_code')}")
-            return (offset, [])
-        content = results[0].get("content")
-        if isinstance(content, str):
-            try:
-                content = json.loads(content)
-            except json.JSONDecodeError:
-                return (offset, [])
+        content = r.json()
         if not isinstance(content, dict):
             return (offset, [])
         cars = content.get("SearchResults") or []
