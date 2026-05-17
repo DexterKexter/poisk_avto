@@ -1,2 +1,3 @@
 requests
-scrapling[stealth]
+scrapling
+playwright
