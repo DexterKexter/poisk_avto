@@ -126,7 +126,6 @@ def main() -> None:
             "logo_url": b.get("logo_url"),
             "source": SOURCE,
             "source_url": b.get("href"),
-            "cars_count": b.get("count") or 0,
             "updated_at": DB.now_iso(),
         }
         r = DB._pg_request(
