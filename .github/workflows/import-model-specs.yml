@@ -1,0 +1,47 @@
+name: Import model specs (autocango)
+
+# For each brand that has cars in our DB, scrape factory specs from
+# autocango /carspecs. Heavy: ~100 brands × ~20 models × 5sec = ~3 hours.
+# Run on demand. Weekly cron refreshes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      brands:
+        description: 'Optional CSV of brand slugs (BMW,Audi,...). Empty = all.'
+        required: false
+        default: ''
+      limit_brands:
+        description: 'Process only first N brands (0 = all)'
+        required: false
+        default: '0'
+      max_models_per_brand:
+        description: 'Max model pages to scrape per brand'
+        required: false
+        default: '200'
+  schedule:
+    # Monthly refresh (1st of month, 23:00 UTC)
+    - cron: '0 23 1 * *'
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps + playwright
+        run: |
+          pip install -r requirements-scrapling.txt
+          python -m playwright install chromium --with-deps
+      - name: Import model specs
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python import_model_specs.py \
+            --brands "${{ inputs.brands }}" \
+            --limit-brands ${{ inputs.limit_brands || 0 }} \
+            --max-models-per-brand ${{ inputs.max_models_per_brand || 200 }}
