@@ -76,3 +76,28 @@ for p, v in walk(data):
             print(f"  {p:80} {type(v).__name__}(len={len(v)})")
         elif isinstance(v, str) and len(v) > 20:
             print(f"  {p:80} = {v[:100]}")
+
+# Dump skuDetail.report — might contain check_id or photo URLs
+print("\n=== skuDetail.report ===")
+report = sku.get("report") or {}
+print(json.dumps(report, ensure_ascii=False, indent=2)[:3000])
+
+# Look for any URL-like field anywhere
+print("\n=== All URL-like fields (containing /motor/, dongchedi.com/api, /sh_) ===")
+for p, v in walk(data):
+    if isinstance(v, str) and any(kw in v for kw in ("/motor/", "/api/", "/sh_", "check_id", "dcdx-default", "/inspection")):
+        print(f"  {p}\n    {v[:160]}")
+
+# Try fetching a known dongchedi inspection-report endpoint with sku_id
+print("\n=== Try /motor/sh_check_report endpoint ===")
+for endpoint in [
+    f"https://www.dongchedi.com/motor/sh_check_report?sku_id={SKU_ID}",
+    f"https://www.dongchedi.com/motor/v1/used_car/check_report?sku_id={SKU_ID}",
+    f"https://www.dongchedi.com/motor/v1/used_car/sku_pic_list?sku_id={SKU_ID}",
+    f"https://www.dongchedi.com/motor/v3/use_car_check_report?sku_id={SKU_ID}",
+]:
+    try:
+        h = oxy_fetch(endpoint)
+        print(f"  {endpoint}\n    len={len(h)}  head={h[:200]!r}")
+    except Exception as e:
+        print(f"  {endpoint}\n    ERR {e}")
