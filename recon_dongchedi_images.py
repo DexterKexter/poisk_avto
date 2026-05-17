@@ -36,6 +36,21 @@ def walk(obj, path=""):
 
 print(f"Fetching {CARD_URL} ...")
 html = oxy_fetch(CARD_URL)
+
+# Also try the mobile URL — often serves higher-res images for retina
+print(f"\nFetching mobile https://m.dongchedi.com/usedcar/{SKU_ID} ...")
+try:
+    m_html = oxy_fetch(f"https://m.dongchedi.com/usedcar/{SKU_ID}")
+    m_imgs = re.findall(r'https?://[^"\s]*byteimg\.com[^"\s]*', m_html)
+    m_imgs = list(dict.fromkeys(m_imgs))
+    print(f"  mobile len={len(m_html)}, unique byteimg URLs: {len(m_imgs)}")
+    for u in m_imgs[:10]:
+        sz = re.search(r":(\d+):(\d+)", u)
+        sz_str = f"{sz.group(1)}x{sz.group(2)}" if sz else "no-tpl"
+        print(f"    [{sz_str}] {u[:140]}")
+except Exception as e:
+    print(f"  mobile ERR: {e}")
+
 print(f"  html len={len(html)}")
 m = NEXT_RE.search(html)
 if not m:
