@@ -1,13 +1,15 @@
 """
-recon_autocango.py v11 — find where IDs actually live in DOM.
+recon_autocango.py v12 — confirm pagination and find prices.
 
-v10 found 0 hrefs matching /usedcar/ACU... Cards probably don't use
-regular links — maybe data-* attributes, onclick handlers, or different
-URL pattern. Need to investigate.
+We have:
+  - card selector: div.car-item
+  - detail URL: /sku/usedcar-{brand}-{model}-{ID}
+  - text contains: id, year, brand, model, engine, mileage, fuel, transm, color, steering
 
-Strategy: search ENTIRE rendered DOM for the ID strings we know are
-present (e.g. ACU90381487). For each match, get the surrounding element
-and its parent. Tells us where IDs live structurally.
+Need to confirm:
+  - pagination via /usedcar/excludeSold=true/page=2 returns different cars
+  - where prices are (text on listing didn't show $/¥ explicitly)
+  - full structured fields per card via selectors
 """
 
 import json
@@ -21,14 +23,53 @@ sys.stdout.reconfigure(line_buffering=True)
 OUT_DIR = "recon_artifacts"
 os.makedirs(OUT_DIR, exist_ok=True)
 
-LISTING_URL = "https://www.autocango.com/usedcar/excludeSold=true"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/131.0.0.0 Safari/537.36")
 
 
+def load(page, url: str) -> list[dict]:
+    """Load URL, return cars extracted from div.car-item."""
+    print(f"\n→ {url}", flush=True)
+    page.goto(url, wait_until="networkidle", timeout=60_000)
+    page.wait_for_timeout(2000)
+
+    cars = page.evaluate(
+        """() => {
+            const cards = Array.from(document.querySelectorAll('div.car-item'));
+            return cards.map(card => {
+                // Top-level link gives href + id
+                const link = card.querySelector('a[href*="/sku/"]');
+                const href = link ? link.href : null;
+                const idMatch = href ? href.match(/[A-Z]{2,4}\\d{6,10}/) : null;
+                const id = idMatch ? idMatch[0] : null;
+
+                // All images in card
+                const imgs = Array.from(card.querySelectorAll('img'))
+                    .map(i => i.src).filter(s => s && !s.startsWith('data:'));
+
+                // Full text content
+                const text = (card.innerText || '').replace(/\\s+/g, ' ').trim();
+
+                // Try to find a price element (text containing $, ¥, FOB, USD)
+                let price_text = null;
+                for (const el of card.querySelectorAll('*')) {
+                    const t = (el.innerText || '').trim();
+                    if (t.length < 50 && /\\$|¥|USD|FOB|RMB|￥/i.test(t)) {
+                        price_text = t;
+                        break;
+                    }
+                }
+
+                return {id, href, images: imgs.slice(0, 8), text, price_text};
+            }).filter(c => c.id);
+        }"""
+    )
+    return cars
+
+
 def main() -> None:
-    print("recon_autocango v11", flush=True)
+    print("recon_autocango v12", flush=True)
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -45,129 +86,63 @@ def main() -> None:
         )
         page = ctx.new_page()
 
-        print(f"Loading {LISTING_URL}…", flush=True)
-        page.goto(LISTING_URL, wait_until="networkidle", timeout=60_000)
-        page.wait_for_timeout(3000)
+        # Page 1
+        cars1 = load(page, "https://www.autocango.com/usedcar/excludeSold=true")
+        ids1 = [c["id"] for c in cars1]
+        print(f"  Page 1: {len(cars1)} cars, first IDs: {ids1[:5]}", flush=True)
 
-        # Scroll to bottom to trigger any lazy load
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(2000)
-        page.evaluate("window.scrollTo(0, 0)")
-        page.wait_for_timeout(1000)
-
-        print(f"  Title: {page.title()!r}", flush=True)
-        html = page.content()
-        print(f"  HTML size: {len(html)}", flush=True)
-
-        # 1. Find ALL hrefs to understand URL patterns
-        print("\n========== ALL UNIQUE hrefs (containing /usedcar or /car) ==========",
-              flush=True)
-        hrefs = page.evaluate(
-            """() => {
-                const all = Array.from(document.querySelectorAll('a[href]'))
-                    .map(a => a.href)
-                    .filter(h => /\\/(usedcar|car|detail|listing)\\//i.test(h));
-                return [...new Set(all)].slice(0, 30);
-            }"""
-        )
-        for h in hrefs:
-            print(f"  {h}", flush=True)
-
-        # 2. Find where the known IDs live in the DOM tree
-        print("\n========== Where do ACU/ACN IDs appear? ==========", flush=True)
-        ids_location = page.evaluate(
-            """() => {
-                const out = [];
-                const idPattern = /\\b[A-Z]{2,4}\\d{6,10}\\b/;
-                const walker = document.createTreeWalker(
-                    document.body, NodeFilter.SHOW_TEXT, null);
-                let node;
-                const seen = new Set();
-                while ((node = walker.nextNode())) {
-                    const m = node.textContent.match(idPattern);
-                    if (m && !seen.has(m[0])) {
-                        seen.add(m[0]);
-                        const parent = node.parentElement;
-                        out.push({
-                            id: m[0],
-                            parent_tag: parent.tagName,
-                            parent_class: parent.className,
-                            parent_html: parent.outerHTML.slice(0, 300),
-                        });
-                        if (out.length >= 5) break;
-                    }
-                }
-                return out;
-            }"""
-        )
-        if ids_location:
-            for loc in ids_location:
-                print(f"\n  ID {loc['id']}:", flush=True)
-                print(f"    tag: {loc['parent_tag']}", flush=True)
-                print(f"    class: {loc['parent_class']}", flush=True)
-                print(f"    html: {loc['parent_html']}", flush=True)
+        # Page 2 via path
+        cars2 = load(page, "https://www.autocango.com/usedcar/excludeSold=true/page=2")
+        ids2 = [c["id"] for c in cars2]
+        print(f"  Page 2: {len(cars2)} cars, first IDs: {ids2[:5]}", flush=True)
+        overlap = len(set(ids1) & set(ids2))
+        print(f"  Overlap with page 1: {overlap}/{len(ids2)}", flush=True)
+        if cars2 and overlap < len(ids2) * 0.5:
+            print(f"  ✅ Pagination via /page=N works", flush=True)
         else:
-            print("  No IDs found in text nodes — they may be in attributes only",
-                  flush=True)
+            print(f"  ⚠️  Same cars — pagination different", flush=True)
 
-        # 3. Find IDs in attributes
-        print("\n========== IDs found in element attributes ==========", flush=True)
-        in_attrs = page.evaluate(
-            """() => {
-                const out = [];
-                const idPattern = /\\b[A-Z]{2,4}\\d{6,10}\\b/;
-                const seen = new Set();
-                for (const el of document.querySelectorAll('*')) {
-                    for (const attr of el.attributes) {
-                        const m = attr.value.match(idPattern);
-                        if (m && !seen.has(m[0] + attr.name)) {
-                            seen.add(m[0] + attr.name);
-                            out.push({
-                                id: m[0],
-                                tag: el.tagName,
-                                attr: attr.name,
-                                value: attr.value.slice(0, 200),
-                                class: el.className.slice(0, 100),
-                            });
-                            if (out.length >= 10) return out;
+        # Print full first car details for field mapping
+        if cars1:
+            c = cars1[0]
+            print(f"\n===== FIRST CAR FULL DETAILS =====", flush=True)
+            print(f"  id: {c['id']}", flush=True)
+            print(f"  href: {c['href']}", flush=True)
+            print(f"  price_text: {c['price_text']!r}", flush=True)
+            print(f"  images ({len(c['images'])}): {c['images'][:3]}", flush=True)
+            print(f"\n  Full text:\n  {c['text']}", flush=True)
+
+        # Save all from page 1
+        save = os.path.join(OUT_DIR, "autocango_page1.json")
+        with open(save, "w", encoding="utf-8") as f:
+            json.dump(cars1, f, ensure_ascii=False, indent=2)
+        print(f"\nSaved → {save}", flush=True)
+
+        # Visit ONE detail page to see what extra fields it has (esp price)
+        if cars1:
+            detail_url = cars1[0]["href"]
+            print(f"\n===== Visiting detail page: {detail_url} =====", flush=True)
+            page.goto(detail_url, wait_until="networkidle", timeout=60_000)
+            page.wait_for_timeout(2000)
+            detail = page.evaluate(
+                """() => {
+                    const text = document.body.innerText.replace(/\\s+/g, ' ').slice(0, 3000);
+                    const prices = [];
+                    for (const el of document.querySelectorAll('*')) {
+                        const t = (el.innerText || '').trim();
+                        if (t.length < 80 && /\\$\\d|¥\\d|USD\\s*\\d|FOB\\s*\\$?\\d|\\d+\\s*USD/i.test(t)) {
+                            prices.push(t);
+                            if (prices.length >= 10) break;
                         }
                     }
-                }
-                return out;
-            }"""
-        )
-        for loc in in_attrs:
-            print(f"  <{loc['tag']} {loc['attr']}={loc['value']!r}> "
-                  f"class={loc['class']!r}", flush=True)
-
-        # 4. Look for repeating card-like structures
-        print("\n========== Candidate car-card containers ==========", flush=True)
-        cards = page.evaluate(
-            """() => {
-                // Find divs that contain a price ($, ¥) AND a year (20XX) AND an image
-                const dollarOrYen = /\\$|¥|USD|FOB/i;
-                const yearRe = /\\b(20\\d{2})\\b/;
-                const candidates = [];
-                for (const div of document.querySelectorAll('div, article, li, section')) {
-                    const text = div.innerText || '';
-                    if (text.length > 1000 || text.length < 30) continue;
-                    if (!dollarOrYen.test(text)) continue;
-                    if (!yearRe.test(text)) continue;
-                    if (!div.querySelector('img')) continue;
-                    candidates.push({
-                        tag: div.tagName,
-                        class: div.className.slice(0, 100),
-                        text_preview: text.replace(/\\s+/g, ' ').slice(0, 200),
-                        outer_h: div.outerHTML.length,
-                    });
-                    if (candidates.length >= 5) break;
-                }
-                return candidates;
-            }"""
-        )
-        for c in cards:
-            print(f"  <{c['tag']}.{c['class']!r}> {c['outer_h']}b", flush=True)
-            print(f"    text: {c['text_preview']}", flush=True)
+                    return {text, prices};
+                }"""
+            )
+            print(f"  Found price-like strings ({len(detail['prices'])}):", flush=True)
+            for pr in detail["prices"][:10]:
+                print(f"    {pr!r}", flush=True)
+            print(f"\n  First 1500 chars of body text:", flush=True)
+            print(f"  {detail['text'][:1500]}", flush=True)
 
         browser.close()
     print("\nDONE", flush=True)
