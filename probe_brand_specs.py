@@ -1,10 +1,18 @@
-"""Decode Nuxt 3 payload to find model entries with brand/model/code."""
-import json, sys, re
+"""Decode Nuxt 3 payload — walk all top-level state buckets to find model list."""
+import json, sys
 sys.stdout.reconfigure(line_buffering=True)
 from playwright.sync_api import sync_playwright
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36")
+
+
+def deref(data, v, depth=0, maxdepth=3):
+    """Resolve an int pointer one level. Limited recursion to avoid loops."""
+    if isinstance(v, int) and 0 <= v < len(data) and depth < maxdepth:
+        return data[v]
+    return v
+
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True,
@@ -18,68 +26,52 @@ with sync_playwright() as p:
     page.wait_for_timeout(2500)
 
     nuxt = page.evaluate("""() => document.getElementById('__NUXT_DATA__').textContent""")
-    print(f"Payload size: {len(nuxt)}")
-
-    # Nuxt 3 payload is a flat JSON array where ints point to other indices
     data = json.loads(nuxt)
     print(f"Array length: {len(data)}")
-    print(f"First 10 elements:")
-    for i, v in enumerate(data[:10]):
-        print(f"  [{i}] {type(v).__name__}: {repr(v)[:200]}")
 
-    # Find indices that contain 'BMW' literally
-    bmw_indices = [i for i, v in enumerate(data) if v == "BMW"]
-    print(f"\nIndices where 'BMW' string lives: {bmw_indices[:5]}")
+    # Index 3 has hash keys → state objects
+    print("\n=== State buckets (idx 3 hash map) ===")
+    state_map = data[3]
+    for hash_key, idx in state_map.items():
+        state_obj = data[idx]
+        print(f"  hash={hash_key[:16]}... idx={idx} type={type(state_obj).__name__}")
+        if isinstance(state_obj, dict):
+            for k, vi in list(state_obj.items())[:8]:
+                inner = deref(data, vi)
+                kind = type(inner).__name__
+                size = len(inner) if hasattr(inner, '__len__') else '-'
+                print(f"    {k}: idx={vi} ({kind}, size={size})")
 
-    # Find dicts that reference "BMW" via pointer
-    print(f"\nDicts (keys) referencing BMW idx:")
-    bmw_set = set(bmw_indices)
-    seen_dicts = 0
+    # Pinia store usually has the route-loaded data
+    print("\n=== Index 17142 (pinia store) ===")
+    if len(data) > 17142:
+        pinia = data[17142]
+        print(f"  type: {type(pinia).__name__}")
+        if isinstance(pinia, dict):
+            for k, vi in list(pinia.items())[:30]:
+                inner = deref(data, vi)
+                kind = type(inner).__name__
+                size = len(inner) if hasattr(inner, '__len__') else '-'
+                preview = repr(inner)[:60] if not isinstance(inner, (dict, list)) else ''
+                print(f"    {k}: idx={vi} ({kind}, size={size}) {preview}")
+
+    # Find ALL lists with >50 elements (likely the BMW model list of 58)
+    print("\n=== Large list candidates (50-200 items) ===")
+    cand = []
     for i, v in enumerate(data):
-        if isinstance(v, dict) and any(val in bmw_set for val in v.values() if isinstance(val, int)):
-            print(f"  [{i}] keys via pointer:")
-            for k_idx, val_idx in v.items():
-                if isinstance(val_idx, int) and 0 <= val_idx < len(data):
-                    key_name = data[k_idx] if isinstance(k_idx, str) else "?"
-                    val_data = data[val_idx]
-                    print(f"    {key_name} (idx {val_idx}) = {repr(val_data)[:80]}")
-            seen_dicts += 1
-            if seen_dicts >= 5:
-                break
-
-    # Look for arrays of dicts (likely the model list)
-    print(f"\nLarge arrays (>20 items, dict-like):")
-    for i, v in enumerate(data):
-        if isinstance(v, list) and len(v) > 20:
-            # Check if first elem is a dict (or int pointing to dict)
-            first = v[0]
-            if isinstance(first, int) and 0 <= first < len(data):
-                target = data[first]
-                if isinstance(target, dict):
-                    print(f"  [{i}] list of {len(v)} dicts. First dict keys:")
-                    for k_idx in list(target.keys())[:15]:
-                        key_name = data[k_idx] if isinstance(k_idx, str) else k_idx
-                        print(f"    {key_name}")
-                    break
-
-    # Search for 5-char codes that match URL pattern, plus their neighbor data
-    print(f"\nLook at one specific model code 'BDMEE' context:")
-    code_idx = None
-    for i, v in enumerate(data):
-        if v == "BDMEE":
-            code_idx = i
-            break
-    if code_idx is not None:
-        print(f"  Index of 'BDMEE' string: {code_idx}")
-        # Find dicts that point to it
-        for i, v in enumerate(data):
-            if isinstance(v, dict) and code_idx in v.values():
-                print(f"  Used in dict [{i}]:")
-                for k_idx, val_idx in v.items():
-                    if isinstance(val_idx, int) and 0 <= val_idx < len(data):
-                        key_name = data[k_idx] if isinstance(k_idx, str) else "?"
-                        val_data = data[val_idx]
-                        print(f"    {key_name} = {repr(val_data)[:80]}")
-                break
+        if isinstance(v, list) and 50 <= len(v) <= 200:
+            cand.append((i, len(v)))
+    print(f"  found {len(cand)} candidates")
+    for i, ln in cand[:10]:
+        # Look at first element
+        first = data[i][0] if data[i] else None
+        first_deref = deref(data, first)
+        kind = type(first_deref).__name__
+        print(f"  [{i}] list of {ln}, first elem: {kind}")
+        if isinstance(first_deref, dict):
+            for k in list(first_deref.keys())[:10]:
+                vi = first_deref[k]
+                inner = deref(data, vi)
+                print(f"      {k}: idx={vi} -> {repr(inner)[:60]}")
 
     browser.close()
