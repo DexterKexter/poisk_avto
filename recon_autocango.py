@@ -1,13 +1,16 @@
 """
-recon_autocango.py — probe /ucbrand to extract brand list with logos.
+recon_autocango.py — extract FULL brand list with logos from /ucbrand.
 
-We want to build a normalized `brands` table. autocango's /ucbrand
-page should list all brands they handle for export, each with logo,
-name, and likely a count of available cars or models.
+From v1: brands are <a href="/usedcar/brandName=X"> with <img> inside.
+Logo is 40x40, alt=brand name. There are 60+ brands total.
+
+This run: extract ALL such pairs (no size filtering, just match by URL
+pattern), dedupe, save complete list.
 """
 
 import json
 import os
+import re
 import sys
 import traceback
 
@@ -22,7 +25,7 @@ UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
 
 
 def main() -> None:
-    print("recon_autocango: /ucbrand", flush=True)
+    print("recon_autocango: full brand list from /ucbrand", flush=True)
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -32,7 +35,7 @@ def main() -> None:
                   "--no-sandbox", "--disable-dev-shm-usage"],
         )
         ctx = browser.new_context(user_agent=UA,
-                                  viewport={"width": 1366, "height": 768},
+                                  viewport={"width": 1366, "height": 4000},  # tall to render all
                                   locale="en-US")
         ctx.add_init_script(
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
@@ -43,117 +46,81 @@ def main() -> None:
         print(f"Loading {url}…", flush=True)
         page.goto(url, wait_until="networkidle", timeout=60_000)
         page.wait_for_timeout(2000)
+        # Scroll to bottom to lazy-load any deferred images
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(2000)
+        page.evaluate("window.scrollTo(0, 0)")
+        page.wait_for_timeout(1000)
 
-        print(f"  Title: {page.title()!r}", flush=True)
-        html = page.content()
-        print(f"  HTML size: {len(html)}", flush=True)
-
-        with open(os.path.join(OUT_DIR, "ucbrand.html"), "w", encoding="utf-8") as f:
-            f.write(html)
-
-        # 1. Probe for brand-card-like structure
-        print("\n========== BRAND ELEMENTS ==========", flush=True)
+        # Extract every <a href="/usedcar/brandName=...">
         brands = page.evaluate(
             r"""() => {
-                // Find all unique images that look like logos (alt or filename)
-                const logos = [];
-                const seen = new Set();
-                for (const img of document.querySelectorAll('img')) {
-                    const src = img.src;
-                    if (!src || src.startsWith('data:')) continue;
-                    if (seen.has(src)) continue;
-                    seen.add(src);
-                    if (!/\.(png|jpe?g|webp|svg)/i.test(src)) continue;
-                    // Logo characteristics: small (<200px), alt with brand name
-                    const r = img.getBoundingClientRect();
-                    // include all imgs for now, classify later
-                    logos.push({
-                        src,
-                        alt: img.alt || '',
-                        title: img.title || '',
-                        width: r.width|0, height: r.height|0,
-                        parent_tag: img.parentElement?.tagName,
-                        parent_class: img.parentElement?.className?.slice(0,80) || '',
-                        // Closest link & text
-                        link: img.closest('a')?.href || null,
-                        link_text: img.closest('a')?.innerText?.trim().slice(0,80) || '',
-                    });
-                }
-                return logos;
-            }"""
-        )
-        print(f"  Total <img>: {len(brands)}", flush=True)
-
-        # Filter to brand-logos: roughly square, smallish, in <a>
-        brand_logos = [b for b in brands
-                       if b["link"]
-                       and 30 < b["width"] < 300
-                       and 30 < b["height"] < 300
-                       and abs(b["width"] - b["height"]) < 100]
-        print(f"  Filtered brand-like logos: {len(brand_logos)}", flush=True)
-
-        print("\n  First 25 candidates:", flush=True)
-        for b in brand_logos[:25]:
-            label = b["alt"] or b["title"] or b["link_text"]
-            print(f"    {label!r:30} | {b['width']}x{b['height']} | {b['link']}", flush=True)
-
-        # 2. Look for any structured brand list (data-brand attributes etc)
-        print("\n========== STRUCTURED BRAND DATA ==========", flush=True)
-        structured = page.evaluate(
-            r"""() => {
                 const out = [];
-                // Common patterns: .brand-item, .brand-card, [data-brand]
-                const sels = ['.brand-item', '.brand-card', '[data-brand]',
-                              '.ucbrand-item', '[class*="brand"]'];
                 const seen = new Set();
-                for (const sel of sels) {
-                    for (const el of document.querySelectorAll(sel)) {
-                        if (seen.has(el)) continue;
-                        seen.add(el);
-                        const link = el.querySelector('a') || el.closest('a');
-                        const img = el.querySelector('img');
-                        out.push({
-                            sel,
-                            tag: el.tagName,
-                            class: el.className?.slice(0, 100) || '',
-                            text: (el.innerText || '').trim().slice(0, 120),
-                            href: link?.href || null,
-                            logo: img?.src || null,
-                            outer_h: el.outerHTML.length,
-                        });
-                        if (out.length >= 20) return out;
-                    }
-                    if (out.length >= 20) break;
+                for (const a of document.querySelectorAll('a[href*="brandName="]')) {
+                    const href = a.getAttribute('href');
+                    const m = href.match(/brandName=([^&\/]+)/);
+                    if (!m) continue;
+                    const slug = decodeURIComponent(m[1]);
+                    if (seen.has(slug)) continue;
+                    seen.add(slug);
+
+                    const img = a.querySelector('img');
+                    out.push({
+                        slug,
+                        name: img?.alt || a.innerText.trim() || slug,
+                        logo_url: img?.src || null,
+                        href: new URL(href, location.origin).href,
+                        // any text in card (might include count of cars)
+                        text: a.innerText.trim().slice(0, 100),
+                    });
                 }
                 return out;
             }"""
         )
-        print(f"  Structured elements found: {len(structured)}", flush=True)
-        for s in structured[:15]:
-            print(f"    [{s['sel']}] {s['tag']}.{s['class']!r} text={s['text']!r}", flush=True)
-            if s['href']:
-                print(f"       href={s['href']}", flush=True)
 
-        # 3. URL pattern analysis: all links from page
-        print("\n========== ALL UNIQUE href patterns (brand-related) ==========", flush=True)
-        hrefs = page.evaluate(
-            r"""() => {
-                const all = Array.from(document.querySelectorAll('a[href]'))
-                    .map(a => a.getAttribute('href'))
-                    .filter(h => h && (h.includes('brand') || h.includes('ucbrand')
-                                       || /\/[a-z]+\/?$/i.test(h)));
-                return [...new Set(all)].slice(0, 60);
-            }"""
-        )
-        for h in hrefs:
-            print(f"    {h}", flush=True)
+        print(f"\n  Extracted {len(brands)} unique brands\n", flush=True)
+        for b in brands:
+            logo = b.get("logo_url") or "(no logo)"
+            print(f"    {b['slug']:25} | {b['name']:25} | {logo[:80]}", flush=True)
 
-        # Save filtered brand logos
-        if brand_logos:
-            save = os.path.join(OUT_DIR, "ucbrand_logos.json")
-            with open(save, "w", encoding="utf-8") as f:
-                json.dump(brand_logos, f, ensure_ascii=False, indent=2)
-            print(f"\nSaved {len(brand_logos)} brand candidates → {save}", flush=True)
+        save = os.path.join(OUT_DIR, "ucbrand_full.json")
+        with open(save, "w", encoding="utf-8") as f:
+            json.dump(brands, f, ensure_ascii=False, indent=2)
+        print(f"\nSaved → {save}", flush=True)
+
+        # Also test going INTO one brand page to see models / car count
+        if brands:
+            sample_brand = "BYD"
+            sample_url = f"https://www.autocango.com/usedcar/brandName={sample_brand}"
+            print(f"\n========== Drilling into {sample_brand} brand page ==========",
+                  flush=True)
+            page.goto(sample_url, wait_until="networkidle", timeout=60_000)
+            page.wait_for_timeout(2000)
+            sample = page.evaluate(
+                r"""() => {
+                    // Total count if shown
+                    const text = document.body.innerText;
+                    const countMatch = text.match(/(\d+)\s+(?:results|cars|items)/i);
+                    const cards = document.querySelectorAll('div.car-item');
+                    // Unique models from car titles
+                    const models = new Set();
+                    for (const card of cards) {
+                        const link = card.querySelector('a[href*="/sku/"]');
+                        if (!link) continue;
+                        const m = link.href.match(/usedcar-[^-]+-(.+?)-[A-Z]{2,4}\d+/);
+                        if (m) models.add(m[1]);
+                    }
+                    return {
+                        count_text: countMatch ? countMatch[0] : null,
+                        cards_visible: cards.length,
+                        unique_models: [...models],
+                    };
+                }"""
+            )
+            print(f"  cards visible: {sample['cards_visible']}", flush=True)
+            print(f"  count text: {sample['count_text']}", flush=True)
+            print(f"  unique models on page 1: {sample['unique_models']}", flush=True)
 
         browser.close()
     print("\nDONE", flush=True)
