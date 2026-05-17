@@ -1,83 +1,68 @@
-"""Inspect HTML around BMW model cards to find URL/code."""
-import json, sys
+"""Inspect XHR + Nuxt payload on /carspecs/brandName=BMW to find model URLs."""
+import json, sys, re
 sys.stdout.reconfigure(line_buffering=True)
 from playwright.sync_api import sync_playwright
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36")
+
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True,
-        args=["--no-sandbox","--disable-blink-features=AutomationControlled"])
-    ctx = browser.new_context(user_agent=UA, viewport={"width":1366,"height":4000})
+        args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
+    ctx = browser.new_context(user_agent=UA, viewport={"width": 1366, "height": 4000})
     ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
     page = ctx.new_page()
+
+    # 1. Capture XHR/Fetch requests
+    xhrs = []
+    def on_response(resp):
+        url = resp.url
+        ct = resp.headers.get("content-type", "")
+        if "json" in ct and ("autocango.com" in url or "/api/" in url):
+            xhrs.append({"url": url, "status": resp.status, "ct": ct})
+    page.on("response", on_response)
+
     page.goto("https://www.autocango.com/carspecs/brandName=BMW",
-              wait_until="load", timeout=60000)
+              wait_until="networkidle", timeout=60000)
     page.wait_for_timeout(3000)
 
-    # 1. Inspect element around "BMW X3" text
-    print("\n=== Outer HTML around 'BMW X3' ===")
-    snippet = page.evaluate("""() => {
-        for (const el of document.querySelectorAll('*')) {
-            const t = (el.innerText || '').trim();
-            if (t.startsWith('BMW X3') && t.includes('Check') && t.length < 200) {
-                return el.outerHTML.slice(0, 2000);
-            }
-        }
-        return 'not found';
-    }""")
-    print(snippet)
+    print(f"\n=== JSON XHR responses ({len(xhrs)}) ===")
+    for x in xhrs[:30]:
+        print(f"  [{x['status']}] {x['url'][:140]}")
 
-    # 2. Any data-* attributes on model cards
-    print("\n=== Data attributes ===")
-    attrs = page.evaluate("""() => {
-        const seen = new Set();
-        const out = [];
-        for (const el of document.querySelectorAll('*')) {
-            for (const a of el.attributes) {
-                if (a.name.startsWith('data-') && !seen.has(a.name)) {
-                    seen.add(a.name);
-                    out.push({name: a.name, sample: a.value.slice(0, 80)});
-                }
-            }
-        }
-        return out.slice(0, 20);
-    }""")
-    for a in attrs: print(f"  {a['name']:30} = {a['sample']}")
+    # 2. Re-fetch one JSON XHR ourselves to see body shape
+    for x in xhrs:
+        if "carspecs" in x["url"].lower() or "brand" in x["url"].lower():
+            print(f"\n=== Fetching body of: {x['url']} ===")
+            try:
+                body = page.evaluate(f"""async () => {{
+                    const r = await fetch({json.dumps(x['url'])}, {{credentials: 'include'}});
+                    const t = await r.text();
+                    return t.slice(0, 3000);
+                }}""")
+                print(body)
+            except Exception as e:
+                print(f"  fetch failed: {e}")
+            break
 
-    # 3. Look for ALL hrefs on the page
-    print("\n=== ALL unique hrefs (first 40) ===")
-    hrefs = page.evaluate("""() => {
-        const seen = new Set();
-        for (const a of document.querySelectorAll('a[href]')) {
-            seen.add(a.getAttribute('href'));
-        }
-        return [...seen].slice(0, 40);
+    # 3. Dump head of __NUXT_DATA__ payload
+    print("\n=== __NUXT_DATA__ head ===")
+    nuxt = page.evaluate("""() => {
+        const s = document.getElementById('__NUXT_DATA__');
+        return s ? s.textContent : null;
     }""")
-    for h in hrefs: print(f"  {h}")
-
-    # 4. Look for Nuxt 3 JSON script
-    print("\n=== Inline JSON scripts ===")
-    scripts = page.evaluate("""() => {
-        const out = [];
-        for (const s of document.querySelectorAll('script')) {
-            const type = s.getAttribute('type') || '';
-            const size = (s.textContent || '').length;
-            if (type === 'application/json' && size > 1000) {
-                out.push({id: s.id, type: type, size: size});
-            }
-        }
-        return out;
-    }""")
-    for s in scripts: print(f"  id={s['id']!r} size={s['size']}")
-
-    # 5. Try clicking "Check 55 Models" button and see URL change
-    print("\n=== Click BMW X3 model card to see URL change ===")
-    try:
-        page.click("text=BMW X3", timeout=5000)
-        page.wait_for_timeout(2000)
-        print(f"  Final URL after click: {page.url}")
-    except Exception as e:
-        print(f"  click failed: {e}")
+    if nuxt:
+        print(f"  total size: {len(nuxt)}")
+        # Find strings that look like 5-char model codes
+        codes = re.findall(r'"([A-Z][A-Z0-9]{3,7})"', nuxt)
+        codes_unique = list(dict.fromkeys(codes))
+        print(f"  candidate codes (first 30): {codes_unique[:30]}")
+        # Find slug-like strings BMW-Model-X
+        slugs = re.findall(r'"(BMW[\w\-]+)"', nuxt)
+        print(f"  BMW slugs (first 20): {slugs[:20]}")
+        # Find URLs
+        urls = re.findall(r'"(/cs/carspecs-[^"]+)"', nuxt)
+        print(f"  /cs/carspecs- URLs in payload: {len(urls)}")
+        for u in urls[:10]: print(f"    {u}")
 
     browser.close()
