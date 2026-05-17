@@ -1,23 +1,18 @@
 """
-recon_autocango.py — raw playwright with realistic UA, no scrapling.
+recon_autocango.py v10 — DOM scraping via playwright.
 
-Strategy:
-  Phase A. Open /usedcar/excludeSold=true via Chromium with realistic UA.
-           If WAF challenge appears, wait for it to resolve automatically
-           (Cloudflare often passes after a JS challenge takes a few seconds).
-           Then dump rendered HTML + look for inline JSON / IDs.
+Phase A from v9 confirmed: playwright passes WAF and loads full HTML.
+Phase B (direct API) hits 403 due to CSRF/signature checks.
 
-  Phase B. Within the same browser context (cookies set by Phase A),
-           call /api/web/usedcar/search with fetch() and capture JSON.
-
-Env: nothing (uses local Chromium via playwright)
+v10: skip the API entirely. After page renders, query the DOM for
+car cards using CSS selectors. Try several common patterns until
+we find the right one, then extract fields.
 """
 
 import json
 import os
 import re
 import sys
-import time
 import traceback
 
 sys.stdout.reconfigure(line_buffering=True)
@@ -26,15 +21,13 @@ OUT_DIR = "recon_artifacts"
 os.makedirs(OUT_DIR, exist_ok=True)
 
 LISTING_URL = "https://www.autocango.com/usedcar/excludeSold=true"
-API_URL = "https://www.autocango.com/api/web/usedcar/search"
-
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/131.0.0.0 Safari/537.36")
 
 
 def main() -> None:
-    print("recon_autocango: raw playwright", flush=True)
+    print("recon_autocango v10: DOM scraping", flush=True)
     from playwright.sync_api import sync_playwright
 
     with sync_playwright() as p:
@@ -46,124 +39,135 @@ def main() -> None:
                 "--disable-dev-shm-usage",
             ],
         )
-        context = browser.new_context(
+        ctx = browser.new_context(
             user_agent=UA,
             viewport={"width": 1366, "height": 768},
             locale="en-US",
-            timezone_id="America/Los_Angeles",
         )
-        # Hide webdriver flag
-        context.add_init_script(
+        ctx.add_init_script(
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
         )
-        page = context.new_page()
+        page = ctx.new_page()
 
-        # ===== Phase A =====
-        print(f"\nPhase A: GET {LISTING_URL}", flush=True)
-        try:
-            page.goto(LISTING_URL, wait_until="networkidle", timeout=60_000)
-        except Exception as e:
-            print(f"  goto exception: {e}", flush=True)
+        print(f"\nLoading {LISTING_URL}…", flush=True)
+        page.goto(LISTING_URL, wait_until="networkidle", timeout=60_000)
+        print(f"  Title: {page.title()!r}", flush=True)
+        page.wait_for_timeout(2000)  # extra time for Vue to render
 
-        # If WAF challenge, wait for it to clear (Cloudflare JS takes ~5s)
-        title = page.title()
-        print(f"  Page title: {title!r}", flush=True)
-        if "Security" in title or "Just a moment" in title:
-            print(f"  Detected WAF challenge — waiting 10s for auto-resolve…",
-                  flush=True)
-            time.sleep(10)
-            try:
-                page.wait_for_load_state("networkidle", timeout=30_000)
-            except Exception:
-                pass
-            title = page.title()
-            print(f"  Title after wait: {title!r}", flush=True)
+        # Use JS to discover the card structure programmatically.
+        print("\nProbing DOM for car cards…", flush=True)
+        probe = page.evaluate(
+            """() => {
+                // Look for href patterns that likely lead to detail pages
+                const links = Array.from(document.querySelectorAll('a[href*="/usedcar/"]'));
+                const detailLinks = links.filter(a => /\\/(?:usedcar|car)\\/[A-Z]+\\d{6,}/.test(a.href));
 
-        html = page.content()
-        print(f"  HTML size: {len(html)}", flush=True)
-        with open(os.path.join(OUT_DIR, "playwright_listing.html"),
-                  "w", encoding="utf-8") as f:
-            f.write(html)
-        print(f"  Saved → recon_artifacts/playwright_listing.html", flush=True)
-
-        ids = sorted(set(re.findall(r'\b[A-Z]{2,4}\d{6,10}\b', html)))
-        print(f"  ID-like tokens found: {len(ids)}", flush=True)
-        if ids:
-            print(f"  First 5: {ids[:5]}", flush=True)
-        print(f"  First 1500 chars:\n  {html[:1500]}", flush=True)
-
-        cookies = context.cookies()
-        print(f"\n  Cookies set: {len(cookies)}", flush=True)
-        for c in cookies[:10]:
-            print(f"    {c['name']} = {c['value'][:50]}…", flush=True)
-
-        # ===== Phase B =====
-        print(f"\nPhase B: POST {API_URL} via in-page fetch()", flush=True)
-        try:
-            result = page.evaluate(
-                """async () => {
-                    try {
-                        const r = await fetch('/api/web/usedcar/search', {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Accept': 'application/json',
-                            },
-                            body: JSON.stringify({
-                                page: 1, pageSize: 20, excludeSold: true
-                            }),
-                        });
-                        const text = await r.text();
-                        return {ok: r.ok, status: r.status, body: text};
-                    } catch (e) {
-                        return {error: e.toString()};
+                // Find unique card containers by walking up from detail links
+                const cards = [];
+                const seenContainers = new Set();
+                for (const a of detailLinks.slice(0, 30)) {
+                    let el = a;
+                    // Walk up to find a "card-like" container
+                    for (let i = 0; i < 5; i++) {
+                        el = el.parentElement;
+                        if (!el) break;
+                        // A reasonable card is 200-2000px tall and 100-800px wide
+                        const r = el.getBoundingClientRect();
+                        if (r.height > 100 && r.height < 2000 && el.children.length >= 2) {
+                            if (!seenContainers.has(el)) {
+                                seenContainers.add(el);
+                                cards.push({
+                                    tag: el.tagName,
+                                    classes: el.className,
+                                    inner_h: el.innerHTML.length,
+                                    children: el.children.length,
+                                });
+                            }
+                            break;
+                        }
                     }
-                }"""
-            )
-        except Exception as e:
-            print(f"  evaluate exception: {e}", flush=True)
-            result = None
+                }
 
-        if result and "body" in result:
-            print(f"  status: {result.get('status')}, ok: {result.get('ok')}",
-                  flush=True)
-            body = result["body"] or ""
-            print(f"  body size: {len(body)}", flush=True)
-            print(f"  first 500 chars: {body[:500]}", flush=True)
-            try:
-                j = json.loads(body)
-                print(f"\n  ✅ JSON received", flush=True)
-                print(f"  Top keys: {list(j.keys()) if isinstance(j, dict) else type(j).__name__}",
-                      flush=True)
-                save = os.path.join(OUT_DIR, "playwright_api_response.json")
-                with open(save, "w", encoding="utf-8") as f:
-                    json.dump(j, f, ensure_ascii=False, indent=2)
-                print(f"  Saved → {save}", flush=True)
+                return {
+                    detailLinkCount: detailLinks.length,
+                    firstHrefs: detailLinks.slice(0, 5).map(a => a.href),
+                    cardSamples: cards.slice(0, 3),
+                };
+            }"""
+        )
+        print(f"  Detail-link count: {probe['detailLinkCount']}", flush=True)
+        print(f"  Sample hrefs:", flush=True)
+        for h in probe["firstHrefs"]:
+            print(f"    {h}", flush=True)
+        print(f"  Card containers found:", flush=True)
+        for c in probe["cardSamples"]:
+            print(f"    {c['tag']}.{c['classes']!r} ({c['children']} children, "
+                  f"{c['inner_h']} chars)", flush=True)
 
-                def find_list(o, path="$", depth=0):
-                    if depth > 6: return None
-                    if isinstance(o, dict):
-                        for k, v in o.items():
-                            if isinstance(v, list) and v and isinstance(v[0], dict):
-                                return f"{path}.{k}", v
-                            r = find_list(v, f"{path}.{k}", depth + 1)
-                            if r: return r
-                    return None
-                f2 = find_list(j)
-                if f2:
-                    path, cars = f2
-                    print(f"  🎯 Cars at {path} ({len(cars)} items)", flush=True)
-                    print(f"  First car keys: {list(cars[0].keys())[:30]}", flush=True)
-                    print(f"\n  ===== FIRST CAR =====", flush=True)
-                    print(json.dumps(cars[0], ensure_ascii=False, indent=2)[:4000],
-                          flush=True)
-            except Exception as e:
-                print(f"  Not JSON: {e}", flush=True)
-        elif result and "error" in result:
-            print(f"  Fetch error: {result['error']}", flush=True)
+        # Now extract structured data: for each unique car link, capture surrounding text
+        print("\nExtracting cars from DOM…", flush=True)
+        cars = page.evaluate(
+            """() => {
+                const out = [];
+                const seenIds = new Set();
+                const links = document.querySelectorAll('a[href*="/usedcar/"]');
+
+                for (const a of links) {
+                    const m = a.href.match(/\\/(usedcar|car)\\/([A-Z]+\\d{6,})/);
+                    if (!m) continue;
+                    const id = m[2];
+                    if (seenIds.has(id)) continue;
+                    seenIds.add(id);
+
+                    // Find parent that contains the most info
+                    let card = a;
+                    for (let i = 0; i < 6; i++) {
+                        const parent = card.parentElement;
+                        if (!parent) break;
+                        const r = parent.getBoundingClientRect();
+                        if (r.height > 300 || parent.children.length >= 3) {
+                            card = parent;
+                            break;
+                        }
+                        card = parent;
+                    }
+
+                    out.push({
+                        id: id,
+                        href: a.href,
+                        // Get all text inside card (separated by | for readability)
+                        text: card.innerText.replace(/\\n+/g, ' | ').trim().slice(0, 600),
+                        // Get all images
+                        images: Array.from(card.querySelectorAll('img'))
+                            .map(i => i.src).filter(s => s).slice(0, 5),
+                        // Get attributes that might hold data
+                        data_attrs: Array.from(card.attributes)
+                            .filter(a => a.name.startsWith('data-'))
+                            .map(a => ({name: a.name, value: a.value})),
+                    });
+                }
+                return out;
+            }"""
+        )
+
+        print(f"  Found {len(cars)} unique car cards\n", flush=True)
+        if cars:
+            print("===== FIRST 3 CARS =====", flush=True)
+            for i, c in enumerate(cars[:3], 1):
+                print(f"\n--- Car {i} (id={c['id']}) ---", flush=True)
+                print(f"  href: {c['href']}", flush=True)
+                print(f"  text: {c['text']}", flush=True)
+                print(f"  images: {c['images'][:2]}", flush=True)
+                if c["data_attrs"]:
+                    print(f"  data-attrs: {c['data_attrs']}", flush=True)
+
+            # Save all
+            save = os.path.join(OUT_DIR, "playwright_cars_dom.json")
+            with open(save, "w", encoding="utf-8") as f:
+                json.dump(cars, f, ensure_ascii=False, indent=2)
+            print(f"\nSaved → {save}", flush=True)
 
         browser.close()
-
     print("\nDONE", flush=True)
 
 
