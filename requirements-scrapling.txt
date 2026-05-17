@@ -1,5 +1,2 @@
 requests
-scrapling
 playwright
-curl_cffi
-camoufox
