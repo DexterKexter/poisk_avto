@@ -174,26 +174,41 @@ def main() -> None:
             print(f"    {m['text']:40} | {m['href']}")
         model_links = model_links or []
 
-        # ===== 3. Drill into one model's spec page =====
-        model_url = None
-        for m in model_links:
-            href = m["href"]
-            # Avoid going back to /carspecs root
-            if (href and href != "/carspecs"
-                and "/carspecs/" in href
-                and href.count("/") >= 3):
-                model_url = href if href.startswith("http") \
-                    else "https://www.autocango.com" + href
-                break
-        if not model_url:
-            print("\n  No model-level spec URL found; skipping drill-down")
-        else:
-            html3 = probe(page, "03_model", model_url, dump_inline_json=True)
-            # Print first 4KB of text to see what fields are there
+        # ===== 3. Drill into a known model-spec URL =====
+        # Pattern: /cs/carspecs-{Brand}-{Model-Hyphenated}-{CODE}
+        # Use Mercedes-Benz EQA Class as sample (6 variants — manageable)
+        SAMPLE_MODEL_URLS = [
+            "https://www.autocango.com/cs/carspecs-Mercedes-Benz-EQA-Class-1LBDX",
+            "https://www.autocango.com/cs/carspecs-AITO-AITO-M9-QXDXY",
+        ]
+        for label_n, url_m in enumerate(SAMPLE_MODEL_URLS, 1):
+            html_m = probe(page, f"03_model_{label_n}", url_m,
+                           dump_inline_json=True)
+            # Print first 5KB of text to see fields
             text = safe_eval(page,
-                """() => document.body.innerText.replace(/\\s+/g,' ').slice(0, 4000)""",
+                """() => document.body.innerText.replace(/\\s+/g,' ').slice(0, 5000)""",
                 default="")
-            print(f"\n  Body text (first 4KB):\n  {text[:4000] if text else '(empty)'}")
+            print(f"\n  Body text (first 5KB):\n  {text[:5000] if text else '(empty)'}")
+            # Find variant cards on page
+            variants = safe_eval(page,
+                r"""() => {
+                    const out = [];
+                    for (const a of document.querySelectorAll('a[href*="carspecs"]')) {
+                        const text = a.innerText.trim().slice(0, 100);
+                        if (text && text.length > 5 && text.length < 200) {
+                            out.push({text, href: a.getAttribute('href')});
+                        }
+                    }
+                    const seen = new Set();
+                    return out.filter(x => {
+                        if (seen.has(x.href)) return false;
+                        seen.add(x.href); return true;
+                    });
+                }""",
+                default=[])
+            print(f"\n  Variant/related-spec links on page: {len(variants or [])}")
+            for v in (variants or [])[:15]:
+                print(f"    {v['text'][:60]:60} | {v['href']}")
 
         browser.close()
     print("\nDONE")
