@@ -1,10 +1,9 @@
 name: Scrape AutoCango (fleet pricelists)
 
+# Fleet offers update slowly and don't need a cron. Trigger manually
+# when you want to refresh — typically right after a new ACF appears on
+# /fleet, or to refresh the xlsx pricelists after dealer updates.
 on:
-  schedule:
-    # Weekly Monday 23:00 UTC = 07:00 Beijing (Tue). Fleet inventory
-    # changes slowly (5 offers/week typical), so once a week is enough.
-    - cron: '0 23 * * 1'
   workflow_dispatch:
 
 jobs:
