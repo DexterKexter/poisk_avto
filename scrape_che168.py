@@ -293,10 +293,15 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
     series_en = series_zh.replace("系", " Series").replace("级", " Class").strip()
     series_en = translate_series(series_en) or series_en
 
-    # Drive / transmission / fuel — translate
+    # Drive / transmission / fuel — translate. Regex on che168 detail page
+    # can pull description fragments ("运转良好" etc) when 变速箱 appears in
+    # text outside the spec block. Validate against the canonical map.
     drive_zh = specs.get("drive_type_zh", "")
+    drive_zh = drive_zh if drive_zh in DRIVE_MAP else ""
     trans_zh = specs.get("transmission_zh", "")
+    trans_zh = trans_zh if trans_zh in TRANSMISSION_MAP else ""
     fuel_zh = specs.get("fuel_zh", "")
+    fuel_zh = fuel_zh if fuel_zh in FUEL_MAP else ""
 
     transfers = parse_int(specs.get("transfers_text"))
 

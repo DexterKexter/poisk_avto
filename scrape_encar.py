@@ -68,6 +68,11 @@ COLOR_MAP = {
     "갈색": "Brown", "고동색": "Dark Brown", "베이지": "Beige",
     "와인색": "Wine", "보라색": "Purple", "분홍색": "Pink",
     "금색": "Gold", "기타": "Other",
+    # Variants seen in live encar data
+    "청색": "Blue", "은회색": "Silver", "빨간색": "Red",
+    "담녹색": "Green", "노란색": "Yellow", "연금색": "Gold",
+    "명은색": "Silver", "진주투톤": "Pearl Two-Tone", "은하색": "Silver",
+    "청옥색": "Blue", "연두색": "Green", "갈대색": "Beige",
 }
 
 FUEL_MAP = {
@@ -76,6 +81,8 @@ FUEL_MAP = {
     "하이브리드": "Hybrid", "가솔린+하이브리드": "Hybrid",
     "디젤+하이브리드": "Hybrid", "LPG+하이브리드": "Hybrid",
     "가솔린+전기": "PHEV", "디젤+전기": "PHEV",
+    # Variants
+    "LPG(일반인 구입)": "LPG", "가솔린+LPG": "Petrol + LPG",
 }
 
 TRANSMISSION_MAP = {
@@ -92,6 +99,8 @@ BODY_MAP = {
     "SUV": "SUV", "RV": "SUV",
     "미니밴": "Minivan", "승합차": "Minivan", "밴": "Minivan",
     "픽업트럭": "Pickup", "트럭": "Truck", "버스": "Bus",
+    # Variants
+    "화물차": "Truck", "경승합차": "Mini Van",
 }
 
 # Korean province codes (first word of contact.address)

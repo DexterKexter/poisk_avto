@@ -285,6 +285,14 @@ SERIES_MAP = {
     "E萤火虫": "Firefly", "萤火虫": "Firefly",
     "FOR-Four乖乖虎": "ForFour",
     "蓝气球": "Blue Balloon", "至境世家": "Galaxy Family",
+    # New CN long-wheelbase / EVs / imports / mass-market
+    "唐L": "Tang L", "汉L": "Han L",
+    "揽境": "Talagon", "揽巡": "Tavendor",
+    "朗逸纯电": "Lavida EV", "迈腾纯电": "Magotan EV",
+    "红杉": "Sequoia", "英仕派": "Inspire",
+    "纳米": "Nano", "纳米06": "Nano 06",
+    "星海T5": "Starhai T5", "星海L7": "Starhai L7",
+    "IQ傲歌": "Optiq",
     # Niche / EVs / coupes / tunings / market-mods
     "运动": "Range Rover Sport", "电动MINI": "MINI Electric",
     "纯电GV70": "Electrified GV70",
@@ -479,6 +487,13 @@ SERIES_TO_BRAND = {
     "FOR-Four乖乖虎": "Smart",
     "蓝气球": "Smart",  # Smart Blue Balloon special edition
     "至境世家": "Geely",  # Geely Galaxy
+    "唐L": "BYD", "汉L": "BYD",
+    "揽境": "Volkswagen", "揽巡": "Volkswagen",
+    "朗逸纯电": "Volkswagen", "迈腾纯电": "Volkswagen",
+    "红杉": "Toyota", "英仕派": "Honda",
+    "纳米": "Dongfeng", "纳米06": "Dongfeng",
+    "星海T5": "Starhai", "星海L7": "Starhai",
+    "IQ傲歌": "Cadillac",
 }
 
 # Strip these suffix tags from extracted series before SERIES_MAP lookup.
