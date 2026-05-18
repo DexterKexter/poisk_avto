@@ -6,22 +6,10 @@ on:
     - cron: '0 22 * * *'
   workflow_dispatch:
     inputs:
-      cities:
-        description: 'Cities (comma-separated)'
+      max_pages:
+        description: 'Hard cap on listing pages to walk'
         required: false
-        default: 'Shanghai,Guangzhou,Shenzhen,Beijing,Tianjin,Chengdu'
-      pages_per_city:
-        description: 'Max listing pages per city'
-        required: false
-        default: '20'
-      min_price:
-        description: 'Minimum price in USD'
-        required: false
-        default: '5000'
-      min_year:
-        description: 'Minimum model year'
-        required: false
-        default: '2024'
+        default: '100'
       collect_limit:
         description: 'Max new IDs to upsert this run'
         required: false
@@ -47,17 +35,14 @@ jobs:
           pip install -r requirements-scrapling.txt
           python -m playwright install chromium --with-deps
 
-      - name: Collect newcar listings (6 cities + filters)
+      - name: Collect newcar listings (no filters, paginate all)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           python collect_autocango_new.py \
-            --cities         "${{ inputs.cities         || 'Shanghai,Guangzhou,Shenzhen,Beijing,Tianjin,Chengdu' }}" \
-            --pages-per-city ${{ inputs.pages_per_city || 20 }} \
-            --min-price      ${{ inputs.min_price      || 5000 }} \
-            --min-year       ${{ inputs.min_year       || 2024 }} \
-            --limit          ${{ inputs.collect_limit  || 5000 }}
+            --max-pages ${{ inputs.max_pages    || 100 }} \
+            --limit     ${{ inputs.collect_limit || 5000 }}
 
       - name: Scrape newcar detail pages (full-res photos)
         env:
