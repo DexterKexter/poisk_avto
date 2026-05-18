@@ -279,7 +279,8 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
         "mark_original": brand_zh or None,
         "mark": mark_en or None,
         "series_original": series_zh or None,
-        "model": (mark_en + " " + series_en).strip() or carname,
+        # Model is bare series (without brand) — frontend renders mark separately
+        "model": series_en or carname,
         "complectation": " ".join(carname.split(" ")[1:]) if " " in carname else None,
         "year": year,
         "reg_date": reg_iso,

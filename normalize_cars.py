@@ -116,19 +116,31 @@ def normalize_row(row: dict) -> dict:
         if new_city and new_city != row.get("city"):
             delta["city"] = new_city
 
-    # 7. Model — rebuild if (a) has Chinese chars OR (b) is missing the brand prefix
+    # 7. Model — clean up two patterns:
+    #    a) "BMW BMW 3 Series" → "BMW 3 Series" (double brand)
+    #    b) "BMW 3 Series" + mark="BMW" → strip leading brand to get "3 Series"
+    #       (frontend re-renders mark separately, avoids "BMW | BMW 3 Series")
     cur_model = row.get("model") or ""
-    target_mark = delta.get("mark") or row.get("mark")
-    if target_mark and series_orig_raw:
+    target_mark = delta.get("mark") or row.get("mark") or ""
+    if target_mark:
+        # Strip duplicate brand
+        prefix_double = f"{target_mark} {target_mark} "
+        if cur_model.startswith(prefix_double):
+            cur_model = cur_model[len(prefix_double):].strip()
+            delta["model"] = cur_model
+        # Strip single brand prefix
+        prefix_single = f"{target_mark} "
+        if cur_model.startswith(prefix_single):
+            stripped = cur_model[len(prefix_single):].strip()
+            if stripped:
+                delta["model"] = stripped
+                cur_model = stripped
+
+    # If model still has Chinese — try to rebuild from series_original (without brand)
+    if target_mark and series_orig_raw and HAS_CN.search(cur_model):
         cleaned = normalize_series(series_orig_raw, mark_orig)
         if cleaned and not HAS_CN.search(cleaned):
-            new_model = f"{target_mark} {cleaned}".strip()
-            need_rebuild = (
-                HAS_CN.search(cur_model)
-                or not cur_model.startswith(target_mark)
-            )
-            if need_rebuild and new_model != cur_model:
-                delta["model"] = new_model
+            delta["model"] = cleaned
 
     return delta
 
