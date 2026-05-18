@@ -49,6 +49,8 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          OXY_USER: ${{ secrets.OXY_USER }}
+          OXY_PASS: ${{ secrets.OXY_PASS }}
         run: |
           python collect_guazi.py \
             --cities         "${{ inputs.cities         || 'Beijing,Shanghai,Guangzhou,Shenzhen,Chengdu,Hangzhou' }}" \

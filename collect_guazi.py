@@ -190,8 +190,47 @@ def _ensure_page():
     return _PAGE
 
 
+OXY_USER = os.environ.get("OXY_USER", "")
+OXY_PASS = os.environ.get("OXY_PASS", "")
+OXY_URL = "https://realtime.oxylabs.io/v1/queries"
+
+
+def _oxylabs_fetch(url: str) -> str | None:
+    """Fetch a guazi page via Oxylabs (China geo).
+    GitHub runners are US-based and guazi 301-redirects them to en.guazi.com,
+    so direct fetch / Playwright both return the English placeholder.
+    """
+    payload = {
+        "source": "universal", "url": url,
+        "geo_location": "China", "locale": "zh-CN", "render": "html",
+    }
+    for attempt in range(3):
+        try:
+            r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
+                              json=payload, timeout=120)
+            if r.status_code != 200:
+                time.sleep(2 ** attempt); continue
+            results = r.json().get("results") or []
+            if not results:
+                time.sleep(2 ** attempt); continue
+            content = results[0].get("content") or ""
+            if len(content) < 5000:
+                time.sleep(2 ** attempt); continue
+            head = content[:3000].lower()
+            if ("captcha" in head or "<title>验证</title>" in content[:3000]
+                    or "请完成下方验证" in content[:3000]):
+                time.sleep(2 ** attempt); continue
+            return content
+        except Exception:
+            time.sleep(2 ** attempt)
+    return None
+
+
 def fetch_html(url: str) -> str | None:
-    """Returns HTML or None on captcha/blocked. Restarts browser if captcha hit."""
+    """Route through Oxylabs when credentials present, else fall back to Playwright
+    (useful for local dev from a CN-resolvable network)."""
+    if OXY_USER and OXY_PASS:
+        return _oxylabs_fetch(url)
     global _REQUESTS_THIS_SESSION
     page = _ensure_page()
     try:
@@ -199,7 +238,6 @@ def fetch_html(url: str) -> str | None:
         page.wait_for_timeout(900)
         _REQUESTS_THIS_SESSION += 1
         if "captcha" in page.url:
-            # restart with a fresh browser context — clear cookies/fingerprint
             print(f"    ⚠ captcha hit after {_REQUESTS_THIS_SESSION} reqs — restart")
             _start_session()
             return None
@@ -207,9 +245,7 @@ def fetch_html(url: str) -> str | None:
         if len(html) < 5000:
             return None
         return html
-    except Exception as e:
-        if "Timeout" in str(e):
-            return None
+    except Exception:
         return None
 
 
