@@ -163,22 +163,30 @@ def extract_specs(html: str) -> dict[str, str]:
 
 
 def extract_photos(html: str) -> list[str]:
+    """Real car photos sit on `2sc2.autoimg.cn/escimg/...` and are templated
+    `<size>_0_q87_c42_autohomecar__<HASH>.<ext>`. Ads / promo banners use the
+    `adm*.autoimg.cn/admdfs/` path and look like `0x0_autohomecar__...` — must
+    be excluded or every listing gets the same generic ad image."""
     raw = re.findall(
         r"(?:https?:)?//[\w.-]*autoimg\.cn/[^\"'\s<>)]+?\.(?:jpg|webp)", html)
-    urls = list(dict.fromkeys(
-        u if u.startswith("http") else "https:" + u for u in raw))
-    # Keep one variant per HASH, upgraded to HD
     seen_hash: set[str] = set()
     out: list[str] = []
-    for u in urls:
-        m = re.search(r"autohomecar__(\w+?)\.(?:jpg|webp)", u)
+    for u in raw:
+        url = u if u.startswith("http") else "https:" + u
+        # 1. Reject ad subdomains/paths
+        if "/admdfs/" in url or "adm" in url.split("//")[1].split("/")[0]:
+            continue
+        # 2. Must be the dealer-photo template (escimg + <size>_0_q87_c42_)
+        if "/escimg/" not in url or "_q87_c42_" not in url:
+            continue
+        m = re.search(r"autohomecar__(\w+?)\.(?:jpg|webp)", url)
         if not m:
             continue
         h = m.group(1)
         if h in seen_hash:
             continue
         seen_hash.add(h)
-        out.append(upgrade_photo(u))
+        out.append(upgrade_photo(url))
     return out
 
 
