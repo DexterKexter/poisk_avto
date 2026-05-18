@@ -36,6 +36,9 @@ BRAND_MAP = {
     "智己": "IM", "智己汽车": "IM",
     "极狐": "ARCFOX", "ARCFOX极狐": "ARCFOX",
     "思皓": "Sehol", "凌宝汽车": "Lingbao", "凌宝": "Lingbao",
+    "思铭": "Honda", "本田思铭": "Honda",
+    "鸿蒙智行": "HIMA",  # Huawei alliance umbrella (sub-brand resolved via SERIES_TO_BRAND)
+    "鸿蒙": "HIMA",
     "东风风光": "Dongfeng Fengguang", "风光": "Dongfeng Fengguang",
     "埃安": "Aion", "广汽埃安": "Aion", "AION": "Aion", "Aion": "Aion",
     "奔腾": "Bestune", "一汽奔腾": "Bestune",
