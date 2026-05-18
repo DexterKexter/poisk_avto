@@ -162,11 +162,20 @@ def parse_car(api_car: dict) -> dict | None:
         year = int(year_month[:4]) if year_month[:4].isdigit() else None
 
         price_wan = advertisement.get("price")
-        price = price_wan * 10000 if isinstance(price_wan, (int, float)) else None
-
         new_price_wan = category.get("originPrice")
         new_price = (new_price_wan * 10000
                      if isinstance(new_price_wan, (int, float)) else None)
+        # encar uses 99999 (만원) as "협의/문의" placeholder. Below 150만원
+        # ($108) AND/OR used < 5% of new = auction down-payments / wholesale
+        # leftovers, not real consumer prices.
+        price = None
+        if isinstance(price_wan, (int, float)) and 150 <= price_wan < 99999:
+            if (new_price_wan and isinstance(new_price_wan, (int, float))
+                    and new_price_wan > 0
+                    and price_wan < new_price_wan * 0.05):
+                price = None
+            else:
+                price = price_wan * 10000
 
         mileage = spec.get("mileage")
 
