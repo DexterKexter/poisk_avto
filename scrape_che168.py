@@ -231,6 +231,8 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
     photos = extract_photos(html)
     vin = extract_vin(html)
 
+    carname = meta.get("carname") or ""
+
     # year = model year (from "2024款" in carname), reg_date = registration date
     _, reg_iso = parse_year_month(
         specs.get("regdate_text") or meta.get("regdate"))
@@ -248,7 +250,6 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
     if not price_cny:
         price_cny = parse_price_cny(specs.get("title", ""))
 
-    carname = meta.get("carname") or ""
     # che168 sometimes joins series with `/`-separated spec tail
     # (e.g. "途锐/3.0T/21款/3.0TSI ..."). Drop everything from the first /.
     if "/" in carname:
