@@ -49,6 +49,19 @@ def fetch_brands() -> list[dict]:
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         page.wait_for_timeout(2000)
 
+        # Pull brand→hash map from the Nuxt payload baked into HTML.
+        # Pattern: "BrandName","HASH"[,count],{"brandName":...
+        html = page.content()
+        import re
+        hash_map: dict[str, str] = {}
+        for name, h in re.findall(
+            r'"([^"\\]{2,40})","([A-Z0-9]{2,6})"(?:,\d+)?,\{"brandName"',
+            html,
+        ):
+            hash_map.setdefault(name, h)
+        print(f"  parsed {len(hash_map)} brand→hash from Nuxt payload",
+              flush=True)
+
         result = page.evaluate(
             r"""() => {
                 const byslug = {};
@@ -99,6 +112,16 @@ def fetch_brands() -> list[dict]:
                 return Object.values(byslug);
             }"""
         )
+        # Backfill logo_url for every brand whose DOM <img> wasn't rendered
+        # (placeholder div in the A-Z grid) using the Nuxt hash.
+        cdn = ("https://i1.autocango.com/brand/{hash}.webp"
+               "?x-image-process=image/quality,q_50/resize,w_80,h_80/imageslim")
+        for b in result:
+            if b.get("logo_url"):
+                continue
+            h = hash_map.get(b["name"]) or hash_map.get(b["slug"])
+            if h:
+                b["logo_url"] = cdn.format(hash=h)
         browser.close()
         return result
 
