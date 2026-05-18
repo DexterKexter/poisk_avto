@@ -345,29 +345,30 @@ def fetch_detail_html(page, url: str) -> str | None:
     """Fetch detail page. Handles anti-bot JS-challenge + lazy-loaded photos.
 
     che168 lazy-loads autoimg.cn photos via JS after DOMContentLoaded — if we
-    grab content() too early there are no image URLs in the DOM yet. Wait for
-    photos to appear (max 6s) before returning.
+    grab content() too early there are no image URLs in the DOM yet. We MUST
+    wait for them; if they never appear, the page is likely the anti-bot shim
+    or a half-loaded state — retry.
     """
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=45_000)
             page.wait_for_timeout(800)
-            # Wait for at least one autoimg URL in the DOM, up to 6s
+            # Wait for at least one autoimg URL — required for a valid scrape
             try:
                 page.wait_for_function(
                     "() => document.documentElement.outerHTML.includes('autoimg.cn')",
-                    timeout=6000,
+                    timeout=12000,
                 )
+                html = page.content()
+                if len(html) > 5000:
+                    return html
             except Exception:
-                pass  # not all detail pages have gallery — fall through anyway
-            html = page.content()
-            if len(html) > 5000:
-                return html
-            page.wait_for_timeout(1500)
+                # photos didn't load — let it settle, retry
+                page.wait_for_timeout(2500)
         except Exception as e:
-            if attempt == 1:
+            if attempt == 2:
                 print(f"      goto err: {str(e)[:120]}")
-            page.wait_for_timeout(2000)
+            page.wait_for_timeout(2500)
     return None
 
 
