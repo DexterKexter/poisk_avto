@@ -1,0 +1,69 @@
+name: Scrape che168
+
+on:
+  schedule:
+    # Daily 19:30 UTC = 03:30 Beijing
+    - cron: '30 19 * * *'
+  workflow_dispatch:
+    inputs:
+      cities:
+        description: 'Cities (comma-separated keys)'
+        required: false
+        default: 'Beijing,Shanghai,Guangzhou,Shenzhen,Chengdu,Hangzhou'
+      pages_per_city:
+        required: false
+        default: '30'
+      min_year:
+        required: false
+        default: '2020'
+      max_mileage_km:
+        required: false
+        default: '100000'
+      min_price_cny:
+        required: false
+        default: '5000'
+      collect_limit:
+        required: false
+        default: '15000'
+      scrape_limit:
+        required: false
+        default: '3000'
+      workers:
+        required: false
+        default: '4'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps + playwright
+        run: |
+          pip install -r requirements-scrapling.txt
+          python -m playwright install chromium --with-deps
+
+      - name: Collect listings (6 cities + filters)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python collect_che168.py \
+            --cities         "${{ inputs.cities         || 'Beijing,Shanghai,Guangzhou,Shenzhen,Chengdu,Hangzhou' }}" \
+            --pages-per-city ${{ inputs.pages_per_city || 30 }} \
+            --min-year       ${{ inputs.min_year       || 2020 }} \
+            --max-mileage-km ${{ inputs.max_mileage_km || 100000 }} \
+            --min-price-cny  ${{ inputs.min_price_cny  || 5000 }} \
+            --limit          ${{ inputs.collect_limit  || 15000 }}
+
+      - name: Scrape detail pages
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python scrape_che168.py \
+            --limit   ${{ inputs.scrape_limit || 3000 }} \
+            --workers ${{ inputs.workers      || 4 }}
