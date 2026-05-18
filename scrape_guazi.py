@@ -227,8 +227,12 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
     source_data = {k: v for k, v in source_data.items() if v is not None}
 
     detail_url = meta.get("url") or f"{BASE_URL}/car-detail/c{clue_id}.html"
-    city_en = meta.get("city")  # listing city (where displayed)
-    city_zh = next((zh for zh, en in CITY_MAP.items() if en == city_en), "")
+    # collector saves Chinese city name (北京) into metadata.city
+    city_zh = (meta.get("city") or "").strip()
+    city_en = tr(city_zh, CITY_MAP) if city_zh else None
+    # If lookup didn't translate (returned the same Chinese back), null it out
+    if city_en and city_en == city_zh:
+        city_en = None
 
     ts = DB.now_iso()
     return {
