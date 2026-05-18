@@ -108,7 +108,15 @@ def normalize_row(row: dict) -> dict:
         prefix, _ = strip_brand_prefix(candidate)
         new_mark = BRAND_MAP.get(prefix) or BRAND_MAP.get(candidate)
     if not new_mark and series_orig_raw:
-        new_mark = SERIES_TO_BRAND.get(series_orig_raw.strip())
+        s = series_orig_raw.strip()
+        new_mark = SERIES_TO_BRAND.get(s)
+        if not new_mark:
+            # Try stripping a known noise suffix (进口/新能源/插电混动/…)
+            for tag in SERIES_SUFFIX_NOISE:
+                if s.endswith(tag) and len(s) > len(tag):
+                    new_mark = SERIES_TO_BRAND.get(s[: -len(tag)].strip())
+                    if new_mark:
+                        break
     if new_mark and new_mark != row.get("mark"):
         delta["mark"] = new_mark
 
