@@ -21,7 +21,34 @@ from typing import Any
 import db as DB
 from chinese_maps import (
     BRAND_MAP, COLOR_MAP, FUEL_MAP, TRANSMISSION_MAP, DRIVE_MAP, CITY_MAP,
+    SERIES_MAP, SERIES_SUFFIX_NOISE,
 )
+
+
+_SERIES_SUFFIX_EN = {
+    "新能源": " EV", "进口": "", "插电混动": " PHEV",
+    "插电式混合动力": " PHEV", "混动": " Hybrid",
+    "PHEV": " PHEV", "EV": " EV",
+}
+
+
+def translate_series(series_zh: str) -> str:
+    """series_zh → English via SERIES_MAP. Tries full string first, then
+    strips a known suffix (新能源/进口/插电混动/…) and re-appends English
+    equivalent.
+    """
+    if not series_zh:
+        return ""
+    s = series_zh.strip()
+    direct = SERIES_MAP.get(s)
+    if direct:
+        return direct
+    for tag in SERIES_SUFFIX_NOISE:
+        if s.endswith(tag) and len(s) > len(tag):
+            stem = s[: -len(tag)].strip()
+            stem_en = SERIES_MAP.get(stem, stem)
+            return (stem_en + _SERIES_SUFFIX_EN.get(tag, "")).strip()
+    return series_zh
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -141,6 +168,20 @@ def normalize_row(row: dict) -> dict:
         cleaned = normalize_series(series_orig_raw, mark_orig)
         if cleaned and not HAS_CN.search(cleaned):
             delta["model"] = cleaned
+            cur_model = cleaned
+
+    # SERIES_MAP pass — translate Chinese model names to official English
+    if cur_model and HAS_CN.search(cur_model):
+        en = translate_series(cur_model)
+        if en and en != cur_model and not HAS_CN.search(en):
+            delta["model"] = en
+            cur_model = en
+        else:
+            # Maybe the full series_original maps (when extraction picked
+            # a noisy variant). Try that as fallback.
+            en2 = translate_series(series_orig_raw)
+            if en2 and not HAS_CN.search(en2):
+                delta["model"] = en2
 
     return delta
 

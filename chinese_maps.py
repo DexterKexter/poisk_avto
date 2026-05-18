@@ -84,6 +84,185 @@ BRAND_MAP = {
     "莲花": "Lotus", "Lotus": "Lotus",
 }
 
+
+# SERIES_MAP — Chinese model/series name → official English
+# Used by all CN-source scrapers (che168, guazi) and normalize_cars backfill.
+# Targets are the manufacturer's official English model name (not pinyin).
+SERIES_MAP = {
+    # VW (China-specific lineup)
+    "朗逸": "Lavida", "帕萨特": "Passat", "凌渡": "Lamando",
+    "探岳": "Tayron", "探岳X": "Tayron X", "途岳": "Tharu",
+    "途昂": "Teramont", "途昂X": "Teramont X", "途观": "Tiguan",
+    "威然": "Viloran", "桑塔纳": "Santana", "宝来": "Bora",
+    "高尔夫": "Golf", "速腾": "Jetta", "迈腾": "Magotan",
+    "辉昂": "Phideon", "辉腾": "Phaeton", "蔚揽": "Variant",
+    "夏朗": "Sharan", "途锐": "Touareg", "途铠": "T-Cross",
+    "昕动": "Spaceback",
+    # GM (Buick/Chevy/Cadillac China)
+    "英朗": "Excelle GT", "威朗": "Verano", "威朗Pro": "Verano Pro",
+    "君越": "LaCrosse", "君威": "Regal", "凯越": "Excelle",
+    "世纪": "Century", "微蓝6": "Velite 6", "微蓝7": "Velite 7",
+    "昂科威": "Envision", "昂科威Plus": "Envision Plus",
+    "昂科旗": "Enclave", "昂科拉": "Encore",
+    "迈锐宝": "Malibu", "迈锐宝XL": "Malibu XL",
+    "科鲁兹": "Cruze", "赛欧": "Sail", "科迈罗": "Camaro",
+    "探界者": "Equinox", "开拓者": "Blazer", "畅巡": "Menlo",
+    "IQ锐歌": "Lyriq",
+    # Toyota
+    "凯美瑞": "Camry", "卡罗拉": "Corolla", "雷凌": "Levin",
+    "亚洲龙": "Avalon", "汉兰达": "Highlander", "普拉多": "Prado",
+    "兰德酷路泽": "Land Cruiser", "陆地巡洋舰": "Land Cruiser",
+    "霸道": "Prado", "塞纳": "Sienna", "埃尔法": "Alphard",
+    "威尔法": "Vellfire", "皇冠": "Crown", "锐志": "Mark X",
+    "RAV4荣放": "RAV4", "威兰达": "Wildlander",
+    "C-HR": "C-HR", "奕泽": "Izoa", "锋兰达": "Frontlander",
+    "凌放": "Harrier", "致炫": "Yaris", "致享": "Yaris L",
+    "卡罗拉锐放": "Corolla Cross", "卡罗拉双擎E+": "Corolla PHEV",
+    "超霸": "4Runner", "超霸4Runner": "4Runner",
+    # Honda
+    "雅阁": "Accord", "思域": "Civic", "飞度": "Fit",
+    "缤智": "Vezel", "皓影": "Breeze", "冠道": "Avancier",
+    "型格": "Integra", "致在": "ZR-V", "奥德赛": "Odyssey",
+    "艾力绅": "Elysion", "凌派": "Crider", "享域": "ENVIX",
+    "思铭": "INSPIRE", "英诗派": "INSPIRE", "雅阁锐·混动": "Accord Hybrid",
+    # Nissan
+    "轩逸": "Sylphy", "天籁": "Teana", "奇骏": "X-Trail",
+    "逍客": "Qashqai", "蓝鸟": "Sylphy Classic", "骐达": "Tiida",
+    "楼兰": "Murano", "途乐": "Patrol", "贵士": "Quest",
+    "途达": "Terra", "西玛": "Maxima", "劲客": "Kicks",
+    "阳光": "Sunny", "骊威": "Livina",
+    # Hyundai / Kia
+    "伊兰特": "Elantra", "朗动": "Elantra Langdong",
+    "领动": "Elantra Lingdong", "悦动": "Elantra Yuedong",
+    "名图": "Mistra", "索纳塔": "Sonata", "途胜": "Tucson",
+    "胜达": "Santa Fe", "ix35": "ix35", "ix25": "ix25",
+    "瑞纳": "Verna", "雅尊": "Azera", "捷恩斯": "Genesis",
+    "K2": "K2", "K3": "K3", "K4": "K4", "K5": "K5",
+    "智跑": "Sportage", "狮跑": "Sportage", "极睿": "Niro",
+    "嘉华": "Carnival", "佳乐": "Carens", "千里马": "Cerato",
+    # Geely + GAC + Chery
+    "帝豪": "Emgrand", "帝豪GL": "Emgrand GL", "帝豪EV": "Emgrand EV",
+    "远景": "Vision", "博越": "Boyue", "博越L": "Boyue L",
+    "博瑞": "Borui", "缤越": "Binyue", "缤瑞": "Binrui",
+    "星瑞": "Preface", "星越": "Xingyue", "星越L": "Xingyue L",
+    "星越S": "Xingyue S", "缤越Cool": "Binyue Cool",
+    "嘉际": "Jiaji", "ICON": "Icon", "豪情": "Haoqing",
+    "瑞虎3": "Tiggo 3", "瑞虎5": "Tiggo 5", "瑞虎7": "Tiggo 7",
+    "瑞虎8": "Tiggo 8", "瑞虎9": "Tiggo 9", "艾瑞泽": "Arrizo",
+    "小蚂蚁": "eQ1", "传祺M8": "Trumpchi M8", "影豹": "Empow",
+    "影酷": "Empow", "GS3": "GS3", "GS4": "GS4", "GS8": "GS8",
+    # BYD
+    "秦": "Qin", "秦PLUS": "Qin PLUS", "秦Pro": "Qin Pro",
+    "汉": "Han", "汉EV": "Han EV", "唐": "Tang", "唐DM": "Tang DM",
+    "宋": "Song", "宋PLUS": "Song PLUS", "宋Pro": "Song Pro",
+    "元": "Yuan", "元PLUS": "Yuan PLUS", "元新能源": "Yuan EV",
+    "海豚": "Dolphin", "海豹": "Seal", "海鸥": "Seagull",
+    "海狮": "Sealion", "海狮07": "Sealion 07",
+    "驱逐舰05": "Destroyer 05", "护卫舰07": "Frigate 07",
+    "F0": "F0", "F3": "F3", "速锐": "Surui", "e1": "e1",
+    "e2": "e2", "e3": "e3",
+    # Wuling / Baojun
+    "宏光MINIEV": "Hongguang Mini EV", "宏光": "Hongguang",
+    "宏光S": "Hongguang S", "宏光PLUS": "Hongguang Plus",
+    "缤果": "Binggo", "缤果PLUS": "Binggo Plus",
+    "星辰": "Xingchen", "凯捷": "Victory", "佳辰": "Jiachen",
+    "Air ev": "Air EV", "悦也": "Yueye",
+    # Roewe / MG
+    "科莱威CLEVER": "Clever", "RX5新能源": "RX5 EV",
+    "RX5": "RX5", "RX3": "RX3", "RX8": "RX8",
+    "i5": "i5", "i6": "i6", "i6MAX": "i6 MAX",
+    "ZS": "ZS", "HS": "HS", "ZS新能源": "ZS EV",
+    # NIO / Onvo / Avita / Aito / Xpeng / Li / Zeekr / Xiaomi
+    "ES6": "ES6", "ES7": "ES7", "ES8": "ES8", "EC6": "EC6",
+    "ET5": "ET5", "ET7": "ET7", "ET9": "ET9",
+    "乐道L60": "Onvo L60", "L60": "L60",
+    "P5": "P5", "P7": "P7", "P7+": "P7+", "G3": "G3",
+    "G6": "G6", "G9": "G9", "X9": "X9", "MONA": "MONA",
+    "M5": "M5", "M7": "M7", "M9": "M9",
+    "L6": "L6", "L7": "L7", "L8": "L8", "L9": "L9",
+    "001": "001", "007": "007", "009": "009", "X": "X",
+    "SU7": "SU7", "YU7": "YU7",
+    # Hongqi
+    "天工05": "Tiangong 05", "天工06": "Tiangong 06",
+    "天工08": "Tiangong 08",
+    "H5": "H5", "H7": "H7", "H9": "H9",
+    "HS3": "HS3", "HS5": "HS5", "HS7": "HS7", "HQ9": "HQ9",
+    "E-HS9": "E-HS9", "E-QM5": "E-QM5",
+    # Voyah / Tank / Lynk & Co
+    "知音": "Free", "梦想家": "Dreamer", "追光": "Zhuiguang",
+    "Voyah 知音": "Free", "Voyah 梦想家": "Dreamer",
+    "700": "Tank 700", "700新能源": "Tank 700 PHEV",
+    "Tank 700新能源": "Tank 700 PHEV",
+    "300": "Tank 300", "400": "Tank 400", "500": "Tank 500",
+    "01": "01", "02": "02", "03": "03", "05": "05",
+    "06": "06", "08": "08", "09": "09", "Z10": "Z10",
+    # Ford
+    "蒙迪欧": "Mondeo", "福克斯": "Focus", "翼虎": "Kuga",
+    "锐界": "Edge", "锐界L": "Edge L", "锐际": "Escape",
+    "探险者": "Explorer", "烈马": "Bronco", "领睿": "Equator Sport",
+    "领裕": "Equator", "全顺": "Transit", "途睿欧": "Tourneo",
+    "电马": "Mustang Mach-E", "福克斯Active": "Focus Active",
+    "翼搏": "EcoSport", "嘉年华": "Fiesta", "金牛座": "Taurus",
+    "锐界Plus": "Edge Plus", "Ford F-150猛禽": "F-150 Raptor",
+    "猛禽": "F-150 Raptor", "F-150猛禽": "F-150 Raptor",
+    # Land Rover / Bentley / Rolls / Maserati / Ferrari / Lambo
+    "揽胜": "Range Rover", "揽胜运动": "Range Rover Sport",
+    "揽胜极光": "Range Rover Evoque", "揽胜星脉": "Range Rover Velar",
+    "极光": "Range Rover Evoque", "星脉": "Range Rover Velar",
+    "发现": "Discovery", "发现运动": "Discovery Sport",
+    "卫士": "Defender", "神行者": "Freelander",
+    "Land Rover 运动": "Range Rover Sport",
+    "Land Rover 极光": "Range Rover Evoque",
+    "飞驰": "Flying Spur", "添越": "Bentayga",
+    "添越插电混动": "Bentayga Hybrid", "欧陆": "Continental",
+    "慕尚": "Mulsanne", "雅致": "Arnage",
+    "Bentley 飞驰": "Flying Spur",
+    "库里南": "Cullinan", "古思特": "Ghost", "幻影": "Phantom",
+    "曜影": "Dawn", "魅影": "Wraith", "银影": "Silver Shadow",
+    "总裁": "Quattroporte", "莱万特": "Levante", "吉博力": "Ghibli",
+    "Maserati 总裁": "Quattroporte", "Maserati 莱万特": "Levante",
+    # Lincoln
+    "航海家": "Nautilus", "飞行家": "Aviator", "大陆": "Continental",
+    "冒险家": "Corsair", "领航员": "Navigator", "MKZ": "MKZ",
+    "MKC": "MKC", "MKX": "MKX",
+    # Lexus / Infiniti / Acura
+    "UX新能源": "UX EV", "ES混动": "ES Hybrid",
+    "QX50": "QX50", "QX55": "QX55", "QX60": "QX60",
+    "RDX": "RDX", "CDX": "CDX",
+    # Mercedes / BMW / Audi (often have CN-specific patterns)
+    "A ClassAMG进口": "A-Class AMG",
+    "E Class新能源": "E-Class PHEV",
+    "C ClassAMG": "C-Class AMG",
+    "Audi A6进口": "A6", "BMW X2进口": "X2",
+    "Audi SQ7": "SQ7", "BMW X4": "X4",
+    # Alfa / Mazda / others
+    "Giulia朱丽叶": "Giulia", "朱丽叶": "Giulia",
+    "斯泰尔维奥": "Stelvio",
+    "阿特兹": "Atenza", "昂克赛拉": "Axela", "CX-50行也": "CX-50",
+    # Changan / JAC / Dongfeng / Brilliance
+    "奔奔": "Benben", "奔奔E-Star": "Benben E-Star",
+    "逸动": "Eado", "逸动PLUS": "Eado PLUS", "逸动DT": "Eado DT",
+    "悦翔": "Yuexiang", "锐程": "Raeton", "CS35": "CS35",
+    "CS55": "CS55", "CS75": "CS75", "CS95": "CS95",
+    "UNI-T": "UNI-T", "UNI-V": "UNI-V", "UNI-K": "UNI-K",
+    "钇为": "Yiwei", "钇为3": "Yiwei 3",
+    "瑞风": "Refine", "嘉悦": "Sehol",
+    "奕炫": "Aeolus E70", "帕拉索": "Palasso",
+    "AX7": "AX7", "AX4": "AX4",
+    # Iconic imports
+    "英力士掷弹兵": "Ineos Grenadier", "掷弹兵": "Grenadier",
+    # Misc CN brand model-as-name (newer EVs)
+    "尊界S800": "Maextro S800",
+    "智界S7": "Luxeed S7", "智界R7": "Luxeed R7",
+    "享界S9": "Stelato S9",
+}
+
+# Strip these suffix tags from extracted series before SERIES_MAP lookup.
+SERIES_SUFFIX_NOISE = (
+    "新能源", "进口", "插电混动", "插电式混合动力", "混动", "PHEV", "EV",
+)
+
+
 COLOR_MAP = {
     "白色": "White", "黑色": "Black", "银色": "Silver", "灰色": "Gray",
     "深灰色": "Dark Gray", "银灰色": "Silver Gray", "浅灰色": "Light Gray",

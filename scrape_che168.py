@@ -40,7 +40,35 @@ PHOTO_HD_TARGET = "1024x768"
 
 from chinese_maps import (
     BRAND_MAP, COLOR_MAP, FUEL_MAP, TRANSMISSION_MAP, DRIVE_MAP, CITY_MAP,
+    SERIES_MAP, SERIES_SUFFIX_NOISE,
 )
+
+
+_SERIES_SUFFIX_EN = {
+    "新能源": " EV", "进口": "", "插电混动": " PHEV",
+    "插电式混合动力": " PHEV", "混动": " Hybrid",
+    "PHEV": " PHEV", "EV": " EV",
+}
+
+
+def translate_series(s: str) -> str:
+    """Chinese model name → English via SERIES_MAP.
+
+    Order matters: try full string first (so combined keys like 宏光MINIEV
+    take precedence), then strip a known suffix and translate the stem.
+    """
+    if not s:
+        return ""
+    s = s.strip()
+    direct = SERIES_MAP.get(s)
+    if direct:
+        return direct
+    for tag in SERIES_SUFFIX_NOISE:
+        if s.endswith(tag) and len(s) > len(tag):
+            stem = s[: -len(tag)].strip()
+            stem_en = SERIES_MAP.get(stem, stem)
+            return (stem_en + _SERIES_SUFFIX_EN.get(tag, "")).strip()
+    return s
 
 
 def tr(value: str, mapping: dict[str, str]) -> str:
@@ -242,8 +270,9 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
                 break
 
     mark_en = tr(brand_zh, BRAND_MAP) or brand_zh or ""
-    # series cleaned: replace 系/级
+    # series cleaned: replace 系/级, then translate via SERIES_MAP if possible
     series_en = series_zh.replace("系", " Series").replace("级", " Class").strip()
+    series_en = translate_series(series_en) or series_en
 
     # Drive / transmission / fuel — translate
     drive_zh = specs.get("drive_type_zh", "")
