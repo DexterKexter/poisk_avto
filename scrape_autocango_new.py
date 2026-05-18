@@ -252,6 +252,18 @@ def safe_int(value) -> int | None:
         return None
 
 
+def dedupe_brand(name: str) -> str:
+    """Collapse autocango's doubled brand names (e.g. 'ROXROX' -> 'ROX')."""
+    if not name:
+        return name
+    s = name.strip()
+    # Exact whole-word doubling, e.g. "ROXROX", "BMWBMW"
+    m = re.match(r'^([A-Za-z]{2,})\1$', s)
+    if m:
+        return m.group(1)
+    return s
+
+
 def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
     ts = DB.now_iso()
 
@@ -268,12 +280,15 @@ def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
 
     year = safe_int(detail.get("model_year")) or meta.get("model_year")
 
-    brand = (detail.get("brand") or meta.get("brand_slug") or "").strip()
+    brand = dedupe_brand((detail.get("brand") or meta.get("brand_slug") or "").strip())
     series = (detail.get("series") or "").strip()
     if not series and meta.get("model_slug"):
         series = meta["model_slug"]
 
     title = detail.get("title") or f"{brand} {series}".strip()
+    # Strip the doubled brand from the title summary too
+    if brand and (brand + brand) in title:
+        title = title.replace(brand + brand, brand)
 
     price_usd = detail.get("export_usd") or meta.get("price_usd")
     msrp_cny = detail.get("msrp_cny") or meta.get("msrp_cny")
