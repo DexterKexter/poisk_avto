@@ -288,9 +288,9 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
         "engine_type": tr(fuel_zh, FUEL_MAP) or None,
         "fuel_original": fuel_zh or None,
         "transmission_original": trans_zh or None,
-        "transmission": tr(trans_zh, TRANSMISSION_MAP) or None,
+        "transmission_type": tr(trans_zh, TRANSMISSION_MAP) or None,
         "drive_type": tr(drive_zh, DRIVE_MAP) or None,
-        "drive_type_original": drive_zh or None,
+        "drive_original": drive_zh or None,
 
         "city_original": city_zh or None,
         "city": city_name or None,

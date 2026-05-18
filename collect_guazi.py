@@ -18,6 +18,7 @@ import time
 from typing import Any
 
 import requests
+from playwright.sync_api import sync_playwright
 
 import db as DB
 
@@ -45,15 +46,30 @@ CITIES = {
 }
 
 
-def build_listing_url(city_slug: str, page: int, min_year: int) -> str:
-    """guazi /{slug}/buy/o{page}c-1n0p0g0s0v0t0z0r0e2y{min_year}-ax/.
-
-    `e2` = exclude sold. `y{year}` = min year. `o{page}` = page number.
-    But the simpler /{slug}/ also works and shows current inventory.
+def build_listing_url(city_slug: str, path_suffix: str = "") -> str:
+    """City homepage or city/brand subpage. Pagination (`/o2/`) triggers captcha;
+    iterate brand-by-brand instead for breadth.
     """
-    if page == 1:
-        return f"{BASE_URL}/{city_slug}/?excludeSold=1"
-    return f"{BASE_URL}/{city_slug}/o{page}/"
+    path_suffix = path_suffix.strip("/")
+    if path_suffix:
+        return f"{BASE_URL}/{city_slug}/{path_suffix}/"
+    return f"{BASE_URL}/{city_slug}/"
+
+
+BRAND_HREF_RE = re.compile(r'href="/([a-z]+)/([a-z0-9_-]+)/?"')
+
+
+def discover_brand_paths(city_slug: str, homepage_html: str) -> list[str]:
+    """Pull all /{city}/{brand}/ URLs from the city homepage navigation."""
+    brands: set[str] = set()
+    for city_part, brand_part in BRAND_HREF_RE.findall(homepage_html):
+        if city_part != city_slug:
+            continue
+        if brand_part in {"buy", "sell", "trade", "tag", "list", "search",
+                           "rank", "sortvalue", "ranklist", "huishou"}:
+            continue
+        brands.add(brand_part)
+    return sorted(brands)
 
 
 HREF_RE  = re.compile(r'href="(/car-detail/c(\d+)\.html)"')
@@ -137,13 +153,39 @@ def upsert_pending(card: dict) -> bool:
     return DB.upsert_pending(rec)
 
 
+_PAGE = None  # lazy playwright session
+
+
+def _ensure_page():
+    global _PAGE
+    if _PAGE is not None:
+        return _PAGE
+    p = sync_playwright().start()
+    browser = p.chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+    )
+    ctx = browser.new_context(
+        user_agent=UA, locale="zh-CN", ignore_https_errors=True,
+        viewport={"width": 1366, "height": 900},
+    )
+    ctx.add_init_script(
+        "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+    )
+    _PAGE = ctx.new_page()
+    return _PAGE
+
+
 def fetch_html(url: str) -> str | None:
+    page = _ensure_page()
     try:
-        r = requests.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
-        r.encoding = "utf-8"
-        if r.status_code != 200 or len(r.text) < 5000:
+        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+        page.wait_for_timeout(800)
+        html = page.content()
+        # captcha redirect heuristic
+        if "captcha" in page.url or len(html) < 5000:
             return None
-        return r.text
+        return html
     except Exception:
         return None
 
@@ -177,20 +219,25 @@ def main() -> None:
     for city in cities:
         slug = CITIES[city]
         print(f"\n[{city}] /{slug}/")
-        seen = set()
-        for page_num in range(1, args.pages_per_city + 1):
+
+        homepage = fetch_html(build_listing_url(slug))
+        if not homepage:
+            print(f"  city homepage empty — skip")
+            continue
+        brand_paths = discover_brand_paths(slug, homepage)
+        print(f"  discovered {len(brand_paths)} brand subpages")
+
+        seen: set[str] = set()
+        # Always scrape the homepage first
+        for path in [""] + brand_paths:
             if saved >= args.limit:
                 print(f"  reached cap {args.limit}")
                 break
-            url = build_listing_url(slug, page_num, args.min_year)
-            html = fetch_html(url)
+            url = build_listing_url(slug, path)
+            html = homepage if not path else fetch_html(url)
             if not html:
-                print(f"  [p{page_num}] empty/blocked — stop")
-                break
+                continue
             cards = extract_cards(html)
-            if not cards:
-                print(f"  [p{page_num}] 0 cards (regex no match) — stop")
-                break
             page_saved = 0
             for c in cards:
                 cid = c["clue_id"]
@@ -206,11 +253,10 @@ def main() -> None:
                     saved += 1
                     page_saved += 1
             elapsed = int(time.time() - started)
-            print(f"  [p{page_num}] {len(cards)} cards → {page_saved} kept "
-                  f"(city {len(seen)}, all {saved}, {elapsed}s)")
-            time.sleep(0.5)
-            if len(cards) < 5:
-                break
+            label = path or "(home)"
+            print(f"  [{label:25}] {len(cards):>3} cards → {page_saved:>3} kept"
+                  f" (city {len(seen)}, all {saved}, {elapsed}s)")
+            time.sleep(0.4)
 
     elapsed = int(time.time() - started)
     print(f"\nDone in {elapsed}s. Upserted: {saved}, filtered: {skipped}")
