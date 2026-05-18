@@ -53,7 +53,7 @@ PHOTO_HD_TARGET = "?x-bce-process=image/quality,q_95/resize,m_fill,w_1920,h_1280
 
 from chinese_maps import (
     BRAND_MAP, COLOR_MAP, FUEL_MAP, TRANSMISSION_MAP, DRIVE_MAP, CITY_MAP,
-    SERIES_MAP, SERIES_SUFFIX_NOISE,
+    SERIES_MAP, SERIES_SUFFIX_NOISE, SERIES_TO_BRAND,
 )
 
 
@@ -206,6 +206,17 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
         series_zh, complectation_zh = series_complectation.split(" ", 1)
     else:
         series_zh, complectation_zh = series_complectation, ""
+    # Skip "YYYY款" as series — fall through to the next token
+    if re.fullmatch(r"\d{4}款", series_zh) and " " in complectation_zh:
+        series_zh, complectation_zh = complectation_zh.split(" ", 1)
+    elif re.fullmatch(r"\d{4}款", series_zh):
+        series_zh = complectation_zh
+        complectation_zh = ""
+    # Model-as-brand fallback when no BRAND_MAP prefix matched
+    if not mark_zh and series_zh:
+        mark_en_fallback = SERIES_TO_BRAND.get(series_zh.strip())
+        if mark_en_fallback:
+            mark_en = mark_en_fallback
 
     # year = model year (from "2020款" in title), reg_date = first registration
     _, reg_iso = parse_yyyymm(pairs.get("首次上牌") or pairs.get("上牌时间"))

@@ -21,7 +21,7 @@ from typing import Any
 import db as DB
 from chinese_maps import (
     BRAND_MAP, COLOR_MAP, FUEL_MAP, TRANSMISSION_MAP, DRIVE_MAP, CITY_MAP,
-    SERIES_MAP, SERIES_SUFFIX_NOISE,
+    SERIES_MAP, SERIES_SUFFIX_NOISE, SERIES_TO_BRAND,
 )
 
 
@@ -98,15 +98,19 @@ def normalize_row(row: dict) -> dict:
     # 1. Mark (brand) — from mark_original OR series_original via BRAND_MAP.
     # che168 listings sometimes drop the brand prefix entirely, so first word
     # of series_original may itself be a model-as-brand stem (e.g. "Cayenne",
-    # "Elantra", "Model 3", "傲虎").
+    # "Elantra", "Model 3", "傲虎", "威霆", "添越", "AMG"). After BRAND_MAP,
+    # fall back to SERIES_TO_BRAND for these orphaned series.
     mark_orig = row.get("mark_original") or ""
     series_orig_raw = row.get("series_original") or ""
     candidate = mark_orig or series_orig_raw
+    new_mark = None
     if candidate:
         prefix, _ = strip_brand_prefix(candidate)
         new_mark = BRAND_MAP.get(prefix) or BRAND_MAP.get(candidate)
-        if new_mark and new_mark != row.get("mark"):
-            delta["mark"] = new_mark
+    if not new_mark and series_orig_raw:
+        new_mark = SERIES_TO_BRAND.get(series_orig_raw.strip())
+    if new_mark and new_mark != row.get("mark"):
+        delta["mark"] = new_mark
 
     # 2. Color
     co = row.get("color_original")

@@ -40,7 +40,7 @@ PHOTO_HD_TARGET = "1024x768"
 
 from chinese_maps import (
     BRAND_MAP, COLOR_MAP, FUEL_MAP, TRANSMISSION_MAP, DRIVE_MAP, CITY_MAP,
-    SERIES_MAP, SERIES_SUFFIX_NOISE,
+    SERIES_MAP, SERIES_SUFFIX_NOISE, SERIES_TO_BRAND,
 )
 
 
@@ -249,13 +249,23 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
         price_cny = parse_price_cny(specs.get("title", ""))
 
     carname = meta.get("carname") or ""
+    # che168 sometimes joins series with `/`-separated spec tail
+    # (e.g. "途锐/3.0T/21款/3.0TSI ..."). Drop everything from the first /.
+    if "/" in carname:
+        carname_for_parse = carname.split("/", 1)[0]
+    else:
+        carname_for_parse = carname
     # Brand: first space-separated token of carname (e.g. "宝马5系 2022款...")
     brand_zh = ""
     series_zh = ""
-    if carname:
+    if carname_for_parse:
         # carname is like "宝马5系 2022款 530Li 尊享型 M运动套装"
-        parts = carname.split(" ", 1)
+        parts = carname_for_parse.split(" ", 1)
         series_zh = parts[0]
+        # Skip "YYYY款" as series — fall through to next token
+        if re.fullmatch(r"\d{4}款", series_zh) and len(parts) > 1:
+            parts = parts[1].split(" ", 1)
+            series_zh = parts[0]
         # Try to find the Chinese brand prefix (longest match first)
         sorted_prefixes = sorted(BRAND_MAP, key=len, reverse=True)
         for prefix in sorted_prefixes:
@@ -270,6 +280,9 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
                 break
 
     mark_en = tr(brand_zh, BRAND_MAP) or brand_zh or ""
+    # Model-as-brand fallback (威霆, 添越, AMG, SUPRA, Huracán, etc.)
+    if not mark_en and series_zh:
+        mark_en = SERIES_TO_BRAND.get(series_zh.strip(), "")
     # series cleaned: replace 系/级, then translate via SERIES_MAP if possible
     series_en = series_zh.replace("系", " Series").replace("级", " Class").strip()
     series_en = translate_series(series_en) or series_en
