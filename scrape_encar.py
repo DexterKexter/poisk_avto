@@ -204,6 +204,16 @@ def parse_car(api_car: dict) -> dict | None:
 
         mark_orig = category.get("manufacturerName", "")
         mark_en = category.get("manufacturerEnglishName") or mark_orig
+        # encar concatenates historical legal-entity names ("ChevroletGMDaewoo",
+        # "Renault-KoreaSamsung", "KG_Mobility_Ssangyong", "Citroen-DS").
+        # Normalize to the current consumer-facing brand.
+        ENCAR_BRAND_ALIASES = {
+            "ChevroletGMDaewoo": "Chevrolet",
+            "Renault-KoreaSamsung": "Renault Korea",
+            "KG_Mobility_Ssangyong": "KG Mobility",
+            "Citroen-DS": "Citroen",
+        }
+        mark_en = ENCAR_BRAND_ALIASES.get(mark_en, mark_en)
         model_group_en = category.get("modelGroupEnglishName", "")
         grade_en = category.get("gradeEnglishName", "")
         model_str = " ".join(x for x in (model_group_en, grade_en) if x).strip()
@@ -219,8 +229,10 @@ def parse_car(api_car: dict) -> dict | None:
 
             "mark_original": mark_orig,
             "mark": mark_en,
-            "series_original": category.get("modelName", ""),
-            "model": model_str or category.get("modelName", ""),
+            # Use English series for display — Korean modelName goes nowhere
+            # visible (frontend reads series_original directly).
+            "series_original": model_group_en or category.get("modelName", ""),
+            "model": model_str or model_group_en or category.get("modelName", ""),
             "complectation": grade_en or category.get("gradeName", ""),
             "year": year,
 
