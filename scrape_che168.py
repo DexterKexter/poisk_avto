@@ -210,10 +210,16 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
         # carname is like "宝马5系 2022款 530Li 尊享型 M运动套装"
         parts = carname.split(" ", 1)
         series_zh = parts[0]
-        # Try to find the Chinese brand prefix
-        for prefix in BRAND_MAP:
+        # Try to find the Chinese brand prefix (longest match first)
+        sorted_prefixes = sorted(BRAND_MAP, key=len, reverse=True)
+        for prefix in sorted_prefixes:
             if series_zh.startswith(prefix):
                 brand_zh = prefix
+                series_zh = series_zh[len(prefix):]
+                break
+        # series may still start with a (shorter) brand prefix
+        for prefix in sorted_prefixes:
+            if series_zh.startswith(prefix):
                 series_zh = series_zh[len(prefix):]
                 break
 

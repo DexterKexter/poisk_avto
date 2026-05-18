@@ -56,49 +56,53 @@ def build_listing_url(city_slug: str, page: int, min_year: int) -> str:
     return f"{BASE_URL}/{city_slug}/o{page}/"
 
 
-CARD_RE = re.compile(
-    r'<div class="car-item\s*">'              # opening
-    r'.*?href="(/car-detail/c(\d+)\.html)".*?'  # url + clueid
-    r'alt="([^"]+)".*?'                       # title
-    r'src="(https?://[^"]+?)\??[^"]*".*?'     # main photo
-    r'<div class="car-item-info-desc">([^<]+)</div>.*?'   # "2019年 | 3.37万公里 | 北京"
-    r'(<div class="car-item-info-tag">.*?</div>).*?'      # tags
-    r'<span class="car-item-info-price-value">([\d.]+)</span>',
-    re.DOTALL,
-)
+HREF_RE  = re.compile(r'href="(/car-detail/c(\d+)\.html)"')
+ALT_RE   = re.compile(r'alt="([^"]+)"')
+PHOTO_RE = re.compile(r'src="(https?://[^"?]+)')
+DESC_RE  = re.compile(r'<div class="car-item-info-desc">(.+?)</div>', re.DOTALL)
+TAGS_RE  = re.compile(r'<div class="car-item-info-tag">(.+?)</div>\s*<div', re.DOTALL)
+PRICE_RE = re.compile(r'<span class="car-item-info-price-value">([\d.]+)</span>')
 
 
 def extract_cards(html: str) -> list[dict]:
-    """Pull every .car-item block."""
+    """Split HTML on `<div class="car-item">` and parse each block individually."""
+    chunks = html.split('<div class="car-item ">')[1:]
     out: list[dict] = []
-    for m in CARD_RE.finditer(html):
-        href, clueid, title, photo, desc, tags_html, price_wan = m.groups()
-        # desc has format "2019年 | 3.37万公里 | 北京"
-        d_parts = [p.strip() for p in desc.split("|")]
+    for chunk in chunks:
+        # Cards are ~2KB; cap defensively so regex stays fast
+        block = chunk[:3000]
+
+        href = HREF_RE.search(block);    alt = ALT_RE.search(block)
+        photo = PHOTO_RE.search(block);  desc = DESC_RE.search(block)
+        tags_m = TAGS_RE.search(block);  price = PRICE_RE.search(block)
+        if not (href and alt and desc and price):
+            continue
+
+        # Desc contains HTML comments `<!-- -->` between segments — strip them
+        desc_text = re.sub(r"<[^>]+>", "", desc.group(1))
+        d_parts = [p.strip() for p in desc_text.split("|") if p.strip()]
         year = mileage_km = city = None
         for p in d_parts:
             ym = re.search(r"(\d{4})\s*年", p)
             if ym:
-                year = int(ym.group(1))
-                continue
+                year = int(ym.group(1)); continue
             km = re.search(r"([\d.]+)\s*万\s*公里", p)
             if km:
-                mileage_km = int(float(km.group(1)) * 10_000)
-                continue
+                mileage_km = int(float(km.group(1)) * 10_000); continue
             if re.search(r"[一-龥]", p):
                 city = p
-        # Tag list (the "已检测" / "纯电动" labels)
-        tags = re.findall(r"<span[^>]*>([^<]+)</span>", tags_html)
+        tags = re.findall(r"<span[^>]*>([^<]+)</span>",
+                          tags_m.group(1) if tags_m else "")
         out.append({
-            "url": BASE_URL + href,
-            "clue_id": clueid,
-            "title": title,
-            "thumb_url": photo,
+            "url": BASE_URL + href.group(1),
+            "clue_id": href.group(2),
+            "title": alt.group(1),
+            "thumb_url": photo.group(1) if photo else None,
             "year": year,
             "mileage_km": mileage_km,
             "city": city,
             "tags": tags,
-            "price_cny": int(float(price_wan) * 10_000),
+            "price_cny": int(float(price.group(1)) * 10_000),
         })
     return out
 

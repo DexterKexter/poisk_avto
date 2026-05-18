@@ -149,14 +149,21 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
     brand_zh = parts[0] if parts else ""
     series_complectation = parts[1] if len(parts) > 1 else ""
 
-    # Resolve brand → English via shared map
+    # Resolve brand → English via shared map (longest match first)
     mark_zh = ""
-    for prefix in BRAND_MAP:
+    sorted_prefixes = sorted(BRAND_MAP, key=len, reverse=True)
+    for prefix in sorted_prefixes:
         if brand_zh.startswith(prefix):
             mark_zh = prefix
-            series_complectation = brand_zh[len(prefix):] + " " + series_complectation
+            series_complectation = (brand_zh[len(prefix):]
+                                    + " " + series_complectation).strip()
             break
     mark_en = tr(mark_zh, BRAND_MAP) or brand_zh
+    # The series often repeats the brand name (e.g. "哪吒汽车 哪吒N01") — strip it too
+    for prefix in sorted_prefixes:
+        if series_complectation.startswith(prefix):
+            series_complectation = series_complectation[len(prefix):].strip()
+            break
 
     series_complectation = series_complectation.strip()
     # First word after brand is usually series
