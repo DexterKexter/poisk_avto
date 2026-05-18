@@ -86,10 +86,13 @@ BRAND_MAP = {
 
 COLOR_MAP = {
     "白色": "White", "黑色": "Black", "银色": "Silver", "灰色": "Gray",
-    "深灰色": "Dark Gray", "蓝色": "Blue", "红色": "Red", "棕色": "Brown",
-    "咖啡色": "Brown", "橙色": "Orange", "黄色": "Yellow", "绿色": "Green",
+    "深灰色": "Dark Gray", "银灰色": "Silver Gray", "浅灰色": "Light Gray",
+    "蓝色": "Blue", "深蓝色": "Dark Blue", "浅蓝色": "Light Blue",
+    "红色": "Red", "深红色": "Dark Red", "暗红色": "Dark Red",
+    "棕色": "Brown", "咖啡色": "Brown",
+    "橙色": "Orange", "黄色": "Yellow", "绿色": "Green",
     "紫色": "Purple", "香槟色": "Champagne", "金色": "Gold", "粉色": "Pink",
-    "其他": "Other",
+    "米色": "Beige", "其他": "Other",
 }
 
 FUEL_MAP = {
