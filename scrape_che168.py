@@ -92,13 +92,19 @@ def parse_mileage_km(s: str | None) -> int | None:
 
 
 def parse_price_cny(s: str | None) -> int | None:
-    """'26.80万' or '￥26.80万' → 268000 CNY."""
+    """'26.80万' or '￥26.80万' → 268000 CNY. Returns None if no `万` marker
+    (refuse to guess from arbitrary digit-strings — title-text would otherwise
+    merge year/spec/price digits into a single huge number)."""
     if not s:
         return None
     m = re.search(r"([\d.]+)\s*万", s)
     if m:
         return int(float(m.group(1)) * 10_000)
-    return parse_int(s)
+    # Title-only-fallback: look for `_<X.YYYY>_` pattern (che168 uses this in <title>)
+    m2 = re.search(r"_([\d.]+)_(?:.{0,6}二手车)", s)
+    if m2:
+        return int(float(m2.group(1)) * 10_000)
+    return None
 
 
 VIN_RE = re.compile(r"\b([A-HJ-NPR-Z][A-HJ-NPR-Z0-9]{16})\b")
@@ -193,14 +199,10 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
         specs.get("regdate_text") or meta.get("regdate"))
     mileage_km = (parse_mileage_km(specs.get("mileage_text"))
                   or int(meta.get("mileage_km") or 0) or None)
-    price_cny = (parse_price_cny(specs.get("title", ""))
-                 or int(meta.get("price_cny") or 0) or None)
+    # Prefer listing metadata (`万` × 10_000 already computed at collect time)
+    price_cny = int(meta.get("price_cny") or 0) or None
     if not price_cny:
-        # try title "_26.8000_"
-        t = specs.get("title", "")
-        m = re.search(r"_([\d.]+)_", t)
-        if m:
-            price_cny = int(float(m.group(1)) * 10_000)
+        price_cny = parse_price_cny(specs.get("title", ""))
 
     carname = meta.get("carname") or ""
     # Brand: first space-separated token of carname (e.g. "宝马5系 2022款...")

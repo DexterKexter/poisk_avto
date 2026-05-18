@@ -62,6 +62,12 @@ BRAND_MAP = {
     "迈凯伦": "McLaren", "布加迪": "Bugatti", "柯尼塞格": "Koenigsegg",
     "哪吒": "Neta", "哪吒汽车": "Neta", "高合": "HiPhi",
     "欧拉": "ORA", "欧拉汽车": "ORA",
+    # Common CN model-as-brand prefixes (che168 sometimes drops parent brand)
+    "揽胜": "Land Rover", "卫士": "Land Rover", "发现": "Land Rover",
+    "坦途": "Toyota", "陆地巡洋舰": "Toyota", "霸道": "Toyota",
+    "途乐": "Nissan", "贵士": "Nissan",
+    "Macan新能源": "Porsche", "卡宴": "Porsche",
+    "迈巴赫": "Mercedes-Maybach",
 }
 
 COLOR_MAP = {
