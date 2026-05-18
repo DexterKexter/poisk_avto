@@ -135,20 +135,20 @@ def extract_trust_badges(html: str) -> dict[str, int]:
 
 
 SPEC_FIELDS = {
-    "regdate_text":     r"上牌时间[^<\n]*?(\d{4}\s*年\s*\d{1,2}\s*月)",
-    "mileage_text":     r"表显里程[^<\n]*?([\d.]+\s*万?\s*公里)",
-    "transfers_text":   r"过户次数[^<\n]*?(\d+)\s*次",
-    "color":            r"车身颜色[^<\n]*?([一-龥]{1,8}色)",
-    "drive_type_zh":    r"驱动方式[^<\n]*?([一-龥]{2,12})",
-    "transmission_zh":  r"变速箱[^<\n]*?([一-龥A-Za-z]{1,10})",
-    "fuel_zh":          r"燃料类型[^<\n]*?([一-龥]{1,8})",
-    "emission":         r"排放标准[^<\n]*?(国\s*[一-龥VI]{1,5})",
-    "displacement":     r"排量[^<\n]*?([\d.]+\s*[TL])",
-    "battery_score":    r"电池评分\s*(\d+)\s*分",
-    "battery_health":   r"电池容量保持率\s*([\d.]+%)",
-    "battery_capacity": r"电池容量[^<]*?([\d.]+\s*kWh)",
-    "ev_range":         r"新车续航[^<]*?(\d+)\s*km",
-    "dealer_address":   r"地址[：:]\s*([一-龥A-Za-z0-9·\s]{8,80})",
+    "regdate_text":     r"上牌时间[\s\S]{0,80}?(\d{4}\s*年\s*\d{1,2}\s*月)",
+    "mileage_text":     r"表显里程[\s\S]{0,80}?([\d.]+\s*万?\s*公里)",
+    "transfers_text":   r"过户次数[\s\S]{0,80}?(\d+)\s*次",
+    "color":            r"车身颜色[\s\S]{0,120}?([一-龥]{1,8}色)",
+    "drive_type_zh":    r"驱动方式[\s\S]{0,120}?([一-龥]{2,12})",
+    "transmission_zh":  r"变速箱[\s\S]{0,120}?([一-龥A-Za-z]{1,10})",
+    "fuel_zh":          r"燃料类型[\s\S]{0,120}?([一-龥]{1,8})",
+    "emission":         r"排放标准[\s\S]{0,120}?(国\s*[一-龥VI]{1,5})",
+    "displacement":     r"排量[\s\S]{0,80}?([\d.]+\s*[TL])",
+    "battery_score":    r"电池评分[\s\S]{0,40}?(\d+)\s*分",
+    "battery_health":   r"电池容量保持率[\s\S]{0,40}?([\d.]+%)",
+    "battery_capacity": r"电池容量[\s\S]{0,40}?([\d.]+\s*kWh)",
+    "ev_range":         r"新车续航[\s\S]{0,40}?(\d+)\s*km",
+    "dealer_address":   r"地址[:]\s*([一-龥A-Za-z0-9·\s]{8,80})",
     "title":            r"<title>([^<]+)</title>",
 }
 
@@ -363,16 +363,18 @@ def fetch_detail_html(page, url: str) -> str | None:
             page.wait_for_timeout(800)
             # Wait for at least one autoimg URL — required for a valid scrape
             try:
+                # Wait for REAL car photos (escimg subpath), not just any autoimg.cn ref
                 page.wait_for_function(
-                    "() => document.documentElement.outerHTML.includes('autoimg.cn')",
-                    timeout=12000,
+                    "() => /escimg\\/[^\"\\']+autohomecar/.test("
+                    "document.documentElement.outerHTML)",
+                    timeout=14000,
                 )
                 html = page.content()
                 if len(html) > 5000:
                     return html
             except Exception:
                 # photos didn't load — let it settle, retry
-                page.wait_for_timeout(2500)
+                page.wait_for_timeout(3000)
         except Exception as e:
             if attempt == 2:
                 print(f"      goto err: {str(e)[:120]}")
