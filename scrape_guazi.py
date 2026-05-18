@@ -201,9 +201,12 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
                                     + " " + series_complectation).strip()
             break
     mark_en = tr(mark_zh, BRAND_MAP) or brand_zh
-    # The series often repeats the brand name (e.g. "哪吒汽车 哪吒N01") — strip it too
+    # The series often repeats the brand name (e.g. "哪吒汽车 哪吒N01") — strip it too.
+    # But NEVER strip a model-as-brand stem (Cayenne, Model 3, 揽胜 etc.) — that
+    # IS the model name we want to keep.
     for prefix in sorted_prefixes:
-        if series_complectation.startswith(prefix):
+        if (series_complectation.startswith(prefix)
+                and prefix not in SERIES_TO_BRAND):
             series_complectation = series_complectation[len(prefix):].strip()
             break
 

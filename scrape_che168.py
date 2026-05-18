@@ -280,8 +280,10 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
                 series_zh = series_zh[len(prefix):]
                 break
         # series may still start with a (shorter) brand prefix
+        # (but never strip a model-as-brand stem like Cayenne / Model 3)
         for prefix in sorted_prefixes:
-            if series_zh.startswith(prefix):
+            if (series_zh.startswith(prefix)
+                    and prefix not in SERIES_TO_BRAND):
                 series_zh = series_zh[len(prefix):]
                 break
 
