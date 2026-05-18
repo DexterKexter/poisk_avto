@@ -340,30 +340,43 @@ class WorkerCtx:
 
 
 def fetch_detail_html(page, url: str) -> str | None:
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-        page.wait_for_timeout(1200)
-        # Anti-bot reload sometimes — wait a bit more
-        page.wait_for_timeout(800)
-        return page.content()
-    except Exception as e:
-        print(f"      goto err: {str(e)[:120]}")
-        return None
+    """Fetch with anti-bot JS-challenge handling. If first response is the
+    JS-challenge shim (~987 bytes), reload once to let cookies settle."""
+    for attempt in range(2):
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+            page.wait_for_timeout(1200)
+            html = page.content()
+            if len(html) > 5000:
+                return html
+            # Probably the JS shim — wait + reload
+            page.wait_for_timeout(1500)
+        except Exception as e:
+            if attempt == 1:
+                print(f"      goto err: {str(e)[:120]}")
+            page.wait_for_timeout(2000)
+    return None
 
 
-def scrape_one(meta_row: dict) -> tuple[str, bool, str]:
-    sku_id = meta_row["source_id"]
-    meta = meta_row.get("metadata") or {}
-    url = meta.get("url") or f"{BASE_URL}/dealer/{meta.get('dealerid')}/{sku_id}.html"
+def scrape_batch(rows: list[dict]) -> list[tuple[str, bool, str]]:
+    """One playwright session per batch — reuse browser across many URLs."""
+    results: list[tuple[str, bool, str]] = []
     with WorkerCtx() as page:
-        html = fetch_detail_html(page, url)
-        if not html or len(html) < 5000:
-            return sku_id, False, "tiny/empty page"
-        rec = parse_card(html, meta, sku_id)
-        if not rec:
-            return sku_id, False, "parse failed"
-        ok = DB.upsert_car(rec)
-        return sku_id, ok, ""
+        for row in rows:
+            sku_id = row["source_id"]
+            meta = row.get("metadata") or {}
+            url = meta.get("url") or f"{BASE_URL}/dealer/{meta.get('dealerid')}/{sku_id}.html"
+            html = fetch_detail_html(page, url)
+            if not html or len(html) < 5000:
+                results.append((sku_id, False, "tiny/empty page"))
+                continue
+            rec = parse_card(html, meta, sku_id)
+            if not rec:
+                results.append((sku_id, False, "parse failed"))
+                continue
+            ok = DB.upsert_car(rec)
+            results.append((sku_id, ok, ""))
+    return results
 
 
 def fetch_pending_rows(limit: int) -> list[dict]:
@@ -398,31 +411,36 @@ def main() -> None:
     pending = fetch_pending_rows(args.limit)
     if not pending:
         print("No pending IDs"); return
-    print(f"Scraping {len(pending)} che168 cards with {args.workers} workers")
+    print(f"Scraping {len(pending)} che168 cards with {args.workers} workers"
+          f" (batches of 20 per playwright session)")
+
+    BATCH_SIZE = 20
+    batches = [pending[i:i+BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)]
 
     ok_count = 0
     fail_count = 0
     started = time.time()
+    processed = 0
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(scrape_one, p): p for p in pending}
-        for i, fut in enumerate(as_completed(futs), 1):
+        futs = {ex.submit(scrape_batch, b): b for b in batches}
+        for fut in as_completed(futs):
             try:
-                sku_id, ok, err = fut.result()
+                results = fut.result()
             except Exception:
                 traceback.print_exc()
-                fail_count += 1
+                fail_count += len(futs[fut])
                 continue
-            if ok:
-                ok_count += 1
-                if i <= 5 or i % 25 == 0:
-                    elapsed = int(time.time() - started)
-                    print(f"  [{i}/{len(pending)}] {sku_id} OK  ({ok_count}/{i}, {elapsed}s)")
-            else:
-                DB.mark_failed(SOURCE, sku_id)
-                fail_count += 1
-                if i <= 10:
-                    print(f"  [{i}/{len(pending)}] {sku_id} FAIL: {err}")
+            for sku_id, ok, err in results:
+                processed += 1
+                if ok:
+                    ok_count += 1
+                else:
+                    DB.mark_failed(SOURCE, sku_id)
+                    fail_count += 1
+            elapsed = int(time.time() - started)
+            print(f"  batch done: {processed}/{len(pending)} "
+                  f"(ok={ok_count}, fail={fail_count}, {elapsed}s)")
 
     elapsed = int(time.time() - started)
     print(f"\nDone in {elapsed}s. OK: {ok_count}, FAIL: {fail_count}")

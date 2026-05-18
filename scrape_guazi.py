@@ -335,23 +335,36 @@ def fetch_pending_rows(limit: int) -> list[dict]:
 
 
 def scrape_batch(rows: list[dict]) -> list[tuple[str, bool, str]]:
-    """One playwright session per batch — reuse browser for N urls before recycle."""
+    """Per-batch playwright session. On captcha, restart browser context once."""
     results: list[tuple[str, bool, str]] = []
-    with WorkerCtx() as page:
+    captcha_streak = 0
+    ctx = WorkerCtx()
+    page = ctx.__enter__()
+    try:
         for row in rows:
             clue_id = row["source_id"]
             meta = row.get("metadata") or {}
             url = meta.get("url") or f"{BASE_URL}/car-detail/c{clue_id}.html"
             html = fetch_detail(url, page)
             if not html:
+                captcha_streak += 1
                 results.append((clue_id, False, "fetch failed"))
+                # 3 fails in a row → recycle browser
+                if captcha_streak >= 3:
+                    ctx.__exit__(None, None, None)
+                    ctx = WorkerCtx()
+                    page = ctx.__enter__()
+                    captcha_streak = 0
                 continue
+            captcha_streak = 0
             rec = parse_card(html, meta, clue_id)
             if not rec:
                 results.append((clue_id, False, "parse failed"))
                 continue
             ok = DB.upsert_car(rec)
             results.append((clue_id, ok, ""))
+    finally:
+        ctx.__exit__(None, None, None)
     return results
 
 
