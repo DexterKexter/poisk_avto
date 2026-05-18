@@ -28,8 +28,14 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python import_brands_autocango.py
 
-      - name: Enrich missing logos
+      - name: Enrich missing logos (autocango grid)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: python enrich_brand_logos.py
+
+      - name: Enrich missing logos (Clearbit fallback)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python enrich_brand_logos_clearbit.py
