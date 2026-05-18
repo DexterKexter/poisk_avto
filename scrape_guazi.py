@@ -234,8 +234,9 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
         "mark_original": mark_zh or brand_zh or None,
         "mark": mark_en or None,
         "series_original": series_zh or None,
-        "model": (mark_en + " " + series_zh
-                  .replace("系", " Series").replace("级", " Class")).strip(),
+        # Model is bare series (without brand) — frontend renders mark separately
+        "model": (series_zh.replace("系", " Series")
+                           .replace("级", " Class").strip()) or None,
         "complectation": complectation_zh or None,
         "year": year,
         "reg_date": reg_iso,
