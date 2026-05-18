@@ -173,7 +173,13 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
     else:
         series_zh, complectation_zh = series_complectation, ""
 
-    year, reg_iso = parse_yyyymm(pairs.get("首次上牌") or pairs.get("上牌时间"))
+    # year = model year (from "2020款" in title), reg_date = first registration
+    _, reg_iso = parse_yyyymm(pairs.get("首次上牌") or pairs.get("上牌时间"))
+    year_match = re.search(r"(\d{4})\s*款", short_title)
+    if year_match:
+        year = int(year_match.group(1))
+    else:
+        year, _ = parse_yyyymm(pairs.get("首次上牌") or pairs.get("上牌时间"))
     mileage_km = parse_mileage_km(pairs.get("表显里程")) or meta.get("mileage_km")
     transfers = parse_int(pairs.get("过户次数"))
     color_zh = pairs.get("车身颜色", "")
