@@ -340,16 +340,27 @@ class WorkerCtx:
 
 
 def fetch_detail_html(page, url: str) -> str | None:
-    """Fetch with anti-bot JS-challenge handling. If first response is the
-    JS-challenge shim (~987 bytes), reload once to let cookies settle."""
+    """Fetch detail page. Handles anti-bot JS-challenge + lazy-loaded photos.
+
+    che168 lazy-loads autoimg.cn photos via JS after DOMContentLoaded — if we
+    grab content() too early there are no image URLs in the DOM yet. Wait for
+    photos to appear (max 6s) before returning.
+    """
     for attempt in range(2):
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-            page.wait_for_timeout(1200)
+            page.wait_for_timeout(800)
+            # Wait for at least one autoimg URL in the DOM, up to 6s
+            try:
+                page.wait_for_function(
+                    "() => document.documentElement.outerHTML.includes('autoimg.cn')",
+                    timeout=6000,
+                )
+            except Exception:
+                pass  # not all detail pages have gallery — fall through anyway
             html = page.content()
             if len(html) > 5000:
                 return html
-            # Probably the JS shim — wait + reload
             page.wait_for_timeout(1500)
         except Exception as e:
             if attempt == 1:
