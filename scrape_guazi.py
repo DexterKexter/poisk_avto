@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import requests
+from playwright.sync_api import sync_playwright
 
 import db as DB
 
@@ -269,13 +270,51 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
     }
 
 
-def fetch_detail(url: str) -> str | None:
+class WorkerCtx:
+    """Per-thread playwright session — guazi detail pages also have anti-bot."""
+    def __init__(self):
+        self.pw = None
+        self.browser = None
+        self.ctx = None
+        self.page = None
+
+    def __enter__(self):
+        self.pw = sync_playwright().start()
+        self.browser = self.pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+        )
+        self.ctx = self.browser.new_context(
+            user_agent=UA, locale="zh-CN", ignore_https_errors=True,
+            viewport={"width": 1366, "height": 900},
+        )
+        self.ctx.add_init_script(
+            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+        )
+        self.page = self.ctx.new_page()
+        return self.page
+
+    def __exit__(self, *_):
+        try:
+            self.browser.close()
+        finally:
+            self.pw.stop()
+
+
+def fetch_detail(url: str, page=None) -> str | None:
+    """Fetch via existing playwright page if given, else open fresh."""
+    if page is None:
+        with WorkerCtx() as p:
+            return fetch_detail(url, p)
     try:
-        r = requests.get(url, headers=HEADERS, timeout=30, allow_redirects=True)
-        r.encoding = "utf-8"
-        if r.status_code != 200 or len(r.text) < 5000:
+        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+        page.wait_for_timeout(800)
+        if "captcha" in page.url:
             return None
-        return r.text
+        html = page.content()
+        if len(html) < 5000:
+            return None
+        return html
     except Exception:
         return None
 
@@ -295,18 +334,25 @@ def fetch_pending_rows(limit: int) -> list[dict]:
     return [p for p in pending if str(p["source_id"]) not in scraped][:limit]
 
 
-def scrape_one(row: dict) -> tuple[str, bool, str]:
-    clue_id = row["source_id"]
-    meta = row.get("metadata") or {}
-    url = meta.get("url") or f"{BASE_URL}/car-detail/c{clue_id}.html"
-    html = fetch_detail(url)
-    if not html:
-        return clue_id, False, "fetch failed"
-    rec = parse_card(html, meta, clue_id)
-    if not rec:
-        return clue_id, False, "parse failed"
-    ok = DB.upsert_car(rec)
-    return clue_id, ok, ""
+def scrape_batch(rows: list[dict]) -> list[tuple[str, bool, str]]:
+    """One playwright session per batch — reuse browser for N urls before recycle."""
+    results: list[tuple[str, bool, str]] = []
+    with WorkerCtx() as page:
+        for row in rows:
+            clue_id = row["source_id"]
+            meta = row.get("metadata") or {}
+            url = meta.get("url") or f"{BASE_URL}/car-detail/c{clue_id}.html"
+            html = fetch_detail(url, page)
+            if not html:
+                results.append((clue_id, False, "fetch failed"))
+                continue
+            rec = parse_card(html, meta, clue_id)
+            if not rec:
+                results.append((clue_id, False, "parse failed"))
+                continue
+            ok = DB.upsert_car(rec)
+            results.append((clue_id, ok, ""))
+    return results
 
 
 def main() -> None:
@@ -321,31 +367,39 @@ def main() -> None:
     pending = fetch_pending_rows(args.limit)
     if not pending:
         print("No pending IDs"); return
-    print(f"Scraping {len(pending)} guazi cards with {args.workers} workers")
+    print(f"Scraping {len(pending)} guazi cards with {args.workers} workers "
+          f"(batches of ~20 per playwright session)")
+
+    # Split pending into batches per worker (one playwright session per batch,
+    # reused for ~20 urls before recycling — keeps cookies fresh but avoids
+    # per-request browser startup cost).
+    BATCH_SIZE = 20
+    batches = [pending[i:i+BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)]
 
     ok_count = 0
     fail_count = 0
     started = time.time()
+    processed = 0
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(scrape_one, p): p for p in pending}
-        for i, fut in enumerate(as_completed(futs), 1):
+        futs = {ex.submit(scrape_batch, b): b for b in batches}
+        for fut in as_completed(futs):
             try:
-                cid, ok, err = fut.result()
+                results = fut.result()
             except Exception:
                 traceback.print_exc()
-                fail_count += 1
+                fail_count += len(futs[fut])
                 continue
-            if ok:
-                ok_count += 1
-                if i <= 5 or i % 25 == 0:
-                    elapsed = int(time.time() - started)
-                    print(f"  [{i}/{len(pending)}] {cid} OK  ({ok_count}/{i}, {elapsed}s)")
-            else:
-                DB.mark_failed(SOURCE, cid)
-                fail_count += 1
-                if i <= 10:
-                    print(f"  [{i}/{len(pending)}] {cid} FAIL: {err}")
+            for cid, ok, err in results:
+                processed += 1
+                if ok:
+                    ok_count += 1
+                else:
+                    DB.mark_failed(SOURCE, cid)
+                    fail_count += 1
+            elapsed = int(time.time() - started)
+            print(f"  batch done: {processed}/{len(pending)} "
+                  f"(ok={ok_count}, fail={fail_count}, {elapsed}s)")
 
     elapsed = int(time.time() - started)
     print(f"\nDone in {elapsed}s. OK: {ok_count}, FAIL: {fail_count}")

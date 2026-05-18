@@ -153,40 +153,63 @@ def upsert_pending(card: dict) -> bool:
     return DB.upsert_pending(rec)
 
 
-_PAGE = None  # lazy playwright session
+_PW = None
+_BROWSER = None
+_CTX = None
+_PAGE = None
+_REQUESTS_THIS_SESSION = 0
 
 
-def _ensure_page():
-    global _PAGE
-    if _PAGE is not None:
-        return _PAGE
-    p = sync_playwright().start()
-    browser = p.chromium.launch(
+def _start_session():
+    """Start (or restart) a fresh browser context."""
+    global _PW, _BROWSER, _CTX, _PAGE, _REQUESTS_THIS_SESSION
+    if _BROWSER:
+        try: _BROWSER.close()
+        except Exception: pass
+        _BROWSER = _CTX = _PAGE = None
+    if _PW is None:
+        _PW = sync_playwright().start()
+    _BROWSER = _PW.chromium.launch(
         headless=True,
         args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
     )
-    ctx = browser.new_context(
+    _CTX = _BROWSER.new_context(
         user_agent=UA, locale="zh-CN", ignore_https_errors=True,
         viewport={"width": 1366, "height": 900},
     )
-    ctx.add_init_script(
+    _CTX.add_init_script(
         "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
     )
-    _PAGE = ctx.new_page()
+    _PAGE = _CTX.new_page()
+    _REQUESTS_THIS_SESSION = 0
+
+
+def _ensure_page():
+    if _PAGE is None:
+        _start_session()
     return _PAGE
 
 
 def fetch_html(url: str) -> str | None:
+    """Returns HTML or None on captcha/blocked. Restarts browser if captcha hit."""
+    global _REQUESTS_THIS_SESSION
     page = _ensure_page()
     try:
         page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-        page.wait_for_timeout(800)
+        page.wait_for_timeout(900)
+        _REQUESTS_THIS_SESSION += 1
+        if "captcha" in page.url:
+            # restart with a fresh browser context — clear cookies/fingerprint
+            print(f"    ⚠ captcha hit after {_REQUESTS_THIS_SESSION} reqs — restart")
+            _start_session()
+            return None
         html = page.content()
-        # captcha redirect heuristic
-        if "captcha" in page.url or len(html) < 5000:
+        if len(html) < 5000:
             return None
         return html
-    except Exception:
+    except Exception as e:
+        if "Timeout" in str(e):
+            return None
         return None
 
 
