@@ -87,89 +87,158 @@ def build_detail_url(meta: dict, source_id: str) -> str:
 
 
 def extract_detail_js() -> str:
-    """JS extractor for newcar detail page. No mileage / no reg date."""
+    """JS extractor for newcar detail pages.
+
+    The /sku/newcar-... page lays out specs as a `Label\\n\\nValue\\n\\n…`
+    table inside "Basic Parameters". Free-text regex against the whole
+    page collides with navigation headers (e.g. matching "Transmission"
+    in the section nav, capturing "Weight & Capacity" as the value), so
+    we parse the parameters block into a label→value dict first and
+    only then map fields.
+    """
     return r"""() => {
-        const text = (document.body.innerText || '').replace(/[ \t]+/g, ' ');
+        const rawText = document.body.innerText || '';
 
-        const get = (re) => {
-            const m = text.match(re);
-            return m ? m[1].trim() : null;
-        };
-
-        const title = (document.querySelector('h1, .car-title')?.innerText || '').trim();
-
+        // Only include images from this listing's gallery.
+        // /new/<hash>.webp = primary photos; /part/<hash>.webp = part shots.
+        // Everything else (/used/, /brand/, /blog/, /news/, logos, icons)
+        // is from recommendations or chrome and must be excluded.
         const images = Array.from(document.querySelectorAll('img'))
             .map(i => i.src)
             .filter(s => s && /\.(jpe?g|png|webp)/i.test(s)
                           && !s.startsWith('data:')
+                          && (s.includes('/new/') || s.includes('/part/'))
                           && !s.includes('rule-traffic-light')
                           && !s.includes('logo'))
             .map(s => s.split('?')[0]);
+        // Dedupe while preserving order
+        const seenImg = new Set();
+        const uniqueImages = images.filter(s => seenImg.has(s) ? false : seenImg.add(s));
 
+        // Prices
         let export_usd = null, msrp_cny = null;
-        const usdMatch = text.match(/\$\s*([\d,]+)\b/);
+        const usdMatch = rawText.match(/FOB[^$]*\$\s*([\d,]+)/)
+                       || rawText.match(/\$\s*([\d,]+)\b/);
         if (usdMatch) export_usd = parseInt(usdMatch[1].replace(/,/g, ''), 10);
-        const cnyMatch = text.match(/MSRP[^\d]*¥\s*([\d,]+)/);
-        if (cnyMatch) msrp_cny = parseInt(cnyMatch[1].replace(/,/g, ''), 10);
-        // Fallback for newcar: yuan price may appear without explicit "MSRP" label
-        if (!msrp_cny) {
-            const anyCnyMatch = text.match(/¥\s*([\d,]+)/);
-            if (anyCnyMatch) msrp_cny = parseInt(anyCnyMatch[1].replace(/,/g, ''), 10);
+        const cnyMatch = rawText.match(/MSRP[^\d]*¥?\s*([\d,]+(?:\.\d+)?)/);
+        if (cnyMatch) msrp_cny = parseInt(cnyMatch[1].replace(/[,.]/g, ''), 10);
+
+        // City — usually "Shanghai Shanghai China" near the FOB block
+        const cityMatch = rawText.match(/\b([A-Z][a-z]+(?: [A-Z][a-z]+)?)\s+(?:Anhui|Beijing|Chongqing|Fujian|Gansu|Guangdong|Guangxi|Guizhou|Hainan|Hebei|Heilongjiang|Henan|Hubei|Hunan|Jiangsu|Jiangxi|Jilin|Liaoning|Ningxia|Qinghai|Shaanxi|Shandong|Shanghai|Shanxi|Sichuan|Tianjin|Xinjiang|Tibet|Yunnan|Zhejiang)\s+China\b/);
+        const city = cityMatch ? cityMatch[1] : null;
+
+        // ── Spec table extraction ──
+        // Strategy: walk every <div>/<span>/<td> that has only text and pair
+        // each "label-looking" node with the next text node as its value.
+        // The whole spec block lives between "Basic Parameters" and
+        // "More Details" markers.
+        const startIdx = rawText.indexOf('Basic Parameters');
+        const endIdx = rawText.indexOf('More Details');
+        let specBlock = (startIdx >= 0 && endIdx > startIdx)
+            ? rawText.substring(startIdx, endIdx)
+            : rawText;
+        // Split into trimmed non-empty tokens
+        const tokens = specBlock.split('\n').map(s => s.trim()).filter(Boolean);
+
+        // Known label set — anything else is treated as a value
+        const LABELS = new Set([
+            'Brand','Series','Manufacturer','Model','MSRP','Launch Date','Launched Time',
+            'Manufacturer Guidance Price','Vehicle Level','Energy Type','Maximum Power(kW)',
+            'Maximum Power(HP)','Maximum Torque(N·m)','Engine','Engine Type','Engine Position',
+            'Drivetrain','Drive Type','Number Of Cylinders','Cylinder Arrangement',
+            'Valve Structure','Displacement(mL)','Displacement(L)','Intake Method',
+            'Fuel','Fuel Type','Fuel Grade','Body Type','Body','Body Color',
+            'Length(mm)','Width(mm)','Height(mm)','Wheelbase(mm)',
+            'Front Track(mm)','Rear Track(mm)','Minimum Ground Clearance(mm)',
+            'Number Of Doors','Number Of Seats','Doors','Seats',
+            'Curb Weight(kg)','Max Loaded Weight(kg)','Rear Trunk Volume(L)',
+            'Fuel Tank Capacity(L)','Transmission Type','Transmission Abbreviation',
+            'Transmission','Number Of Gears','Steering Type','Steering','Steering Wheel Position',
+            'Front Brake Type','Rear Brake Type','Parking Brake Type',
+            'Front Suspension Type','Rear Suspension Type',
+            'Front Tire Specs','Rear Tire Specs','Spare Tire Specs','Tire Material',
+            'Battery capacity (kWh)','Battery Capacity','Range (KM)','Pure Electric Range',
+            'Motor Power (kW)','Engine Power (kW)','Model Year','Warranty',
+        ]);
+
+        const specs = {};
+        for (let i = 0; i < tokens.length - 1; i++) {
+            const lbl = tokens[i];
+            const val = tokens[i + 1];
+            if (!LABELS.has(lbl)) continue;
+            if (LABELS.has(val)) continue;  // adjacent labels — value missing
+            if (specs[lbl] === undefined) specs[lbl] = val;
         }
 
+        // Description block — Description ... Contact your AutoCango
         let description = '';
-        const descStart = text.indexOf('Description');
-        const descEnd = text.indexOf('Contact your AutoCango');
+        const descStart = rawText.indexOf('Description');
+        const descEnd = rawText.indexOf('Contact your AutoCango');
         if (descStart > 0 && descEnd > descStart) {
-            description = text.substring(descStart + 11, descEnd).trim()
+            description = rawText.substring(descStart + 11, descEnd).trim()
                 .replace(/Availability Check：[^\n]+/, '')
                 .replace(/Condition：/g, '').trim();
         }
 
-        let accessories = [];
-        const accStart = text.indexOf('Accessories');
-        const accEnd = text.indexOf('Relevant Car Specs');
-        if (accStart > 0 && accEnd > accStart) {
-            accessories = text.substring(accStart + 11, accEnd)
-                .split('\n').map(s => s.trim())
-                .filter(s => s && s.length < 50);
+        // Numeric helper
+        const num = (v) => {
+            if (!v || v === '-' || v === '○') return null;
+            const m = String(v).match(/-?\d+(?:\.\d+)?/);
+            return m ? m[0] : null;
+        };
+
+        // Title — prefer the "Model" field from the spec dict (canonical),
+        // fall back to first line in Basic Parameters that looks like a
+        // model summary, then to <h1>.
+        const summaryRe = /\d{4}\s+[A-Za-z][\w \-]+?\s+\d+\.\d+[TL]?\s+\d+HP\s+L\d+(?:\s+\w+)?/;
+        let title = specs['Model'] || null;
+        if (!title) {
+            const m = specBlock.match(summaryRe);
+            title = m ? m[0].trim()
+                : (document.querySelector('h1, .car-title')?.innerText || '').trim();
         }
 
-        const cityMatch = text.match(/\b([A-Z][a-z]+(?: [A-Z][a-z]+)?)\s+(?:Anhui|Beijing|Chongqing|Fujian|Gansu|Guangdong|Guangxi|Guizhou|Hainan|Hebei|Heilongjiang|Henan|Hubei|Hunan|Jiangsu|Jiangxi|Jilin|Liaoning|Ningxia|Qinghai|Shaanxi|Shandong|Shanghai|Shanxi|Sichuan|Tianjin|Xinjiang|Tibet|Yunnan|Zhejiang)\s+China\b/);
-        const city = cityMatch ? cityMatch[1] : null;
+        // Engine summary like "1.5T 160HP L4 7DCT" — extract from title once defined
+        let engineSummary = null;
+        const engM = (title || '').match(/(\d+\.\d+[TL]?\s+\d+HP\s+L\d+)/);
+        if (engM) engineSummary = engM[1];
 
         return {
             title,
-            images: images.slice(0, 30),
+            images: uniqueImages.slice(0, 30),
             export_usd, msrp_cny,
             description: description.slice(0, 4000),
-            accessories: accessories.slice(0, 50),
+            accessories: [],
             city,
 
-            ref_id:        get(/Ref ID\s+([A-Z0-9]+)/),
-            steering:      get(/Steering\s+(Left|Right)/),
-            model_code:    get(/Model Code\s+(\S+)/),
-            body_type:     get(/Body Type\s+([A-Za-z\/-]+)/),
-            color:         get(/Exterior Color\s+([A-Za-z]+)/),
-            fuel:          get(/Fuel\s+([A-Za-z]+)/),
-            transmission:  get(/Transmission\s+([A-Za-z\-]+)/),
-            drivetrain:    get(/Drivetrain\s+([A-Za-z0-9]+)/),
-
-            model_year:    get(/Model Year\s+(\d{4})/),
-            engine_cc:     get(/Engine\(cc\)\s+(\d+|-)/),
-            seats:         get(/Seats\s+(\d+)/),
-            doors:         get(/Doors\s+(\d+)/),
-            weight_kg:     get(/Weight\(kg\)\s+(\d+|-)/),
-            max_cap_kg:    get(/Max\.Cap\(kg\)\s+(\d+|-)/),
-            battery_cap:   get(/Batt\.Cap\.\(kWh\)\s+([\d.]+|-)/),
-            range_km:      get(/Range\(km\)\s+(\d+|-)/),
-            motor_power:   get(/Motor Power\(kW\)\s+(\d+|-)/),
-
-            engine:        get(/Engine\s+(\d+\.\d+[TL]\s+\d+HP\s+L\d+)/),
-            dimensions:    get(/Dim\.\(mm\)\s+(\d+\*\d+\*\d+)/),
-            volume_m3:     get(/M³\s+([\d.]+|-)/),
-            brand:         get(/\bBrand\s+([A-Z][A-Za-z\- ]+?)\s+Series\b/),
-            series:        get(/\bSeries\s+([A-Za-z0-9 .\-]+?)\s+(?:Model Year|Engine)/),
+            // From spec dict
+            brand:        specs['Brand'] || null,
+            series:       specs['Series'] || null,
+            model_year:   specs['Model Year'] || (title.match(/^(\d{4})/) || [])[1] || null,
+            engine:       engineSummary,
+            fuel:         specs['Fuel'] || specs['Fuel Type'] || specs['Energy Type'] || null,
+            transmission: specs['Transmission Type'] || specs['Transmission Abbreviation'] || null,
+            drivetrain:   specs['Drivetrain'] || null,
+            body_type:    specs['Body Type'] || specs['Vehicle Level'] || null,
+            color:        specs['Body Color'] || null,
+            steering:     specs['Steering Type'] || specs['Steering Wheel Position'] || null,
+            engine_cc:    num(specs['Displacement(mL)']),
+            seats:        num(specs['Number Of Seats'] || specs['Seats']),
+            doors:        num(specs['Number Of Doors'] || specs['Doors']),
+            weight_kg:    num(specs['Curb Weight(kg)']),
+            max_cap_kg:   num(specs['Max Loaded Weight(kg)']),
+            battery_cap:  num(specs['Battery capacity (kWh)'] || specs['Battery Capacity']),
+            range_km:     num(specs['Range (KM)'] || specs['Pure Electric Range']),
+            motor_power:  num(specs['Motor Power (kW)'] || specs['Engine Power (kW)']),
+            length_mm:    num(specs['Length(mm)']),
+            width_mm:     num(specs['Width(mm)']),
+            height_mm:    num(specs['Height(mm)']),
+            wheelbase_mm: num(specs['Wheelbase(mm)']),
+            model_code:   null,
+            ref_id:       null,
+            volume_m3:    null,
+            dimensions:   null,
+            specs_raw:    specs,
         };
     }"""
 
@@ -186,10 +255,10 @@ def safe_int(value) -> int | None:
 def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
     ts = DB.now_iso()
 
-    dim_m = re.match(r'(\d+)\*(\d+)\*(\d+)', detail.get("dimensions", "") or "")
-    length = int(dim_m.group(1)) if dim_m else None
-    width = int(dim_m.group(2)) if dim_m else None
-    height = int(dim_m.group(3)) if dim_m else None
+    length = safe_int(detail.get("length_mm"))
+    width = safe_int(detail.get("width_mm"))
+    height = safe_int(detail.get("height_mm"))
+    wheelbase = safe_int(detail.get("wheelbase_mm"))
 
     eng = detail.get("engine", "") or ""
     disp_match = re.search(r'(\d+\.\d+)\s*[TL]', eng)
@@ -241,8 +310,9 @@ def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
         "fuel_original": detail.get("fuel", "") or "",
         "transmission_original": detail.get("transmission", "") or "",
         "transmission_type": tr(detail.get("transmission", ""), TRANSMISSION_MAP),
-        "drive_original": detail.get("drivetrain", "") or "",
-        "drive_type": tr(detail.get("drivetrain", ""), DRIVE_MAP),
+        # Drop placeholder values like "Drive Mode" that aren't real drivetrains
+        "drive_original": detail.get("drivetrain") if detail.get("drivetrain") in DRIVE_MAP else "",
+        "drive_type": tr(detail.get("drivetrain", ""), DRIVE_MAP, default="") if detail.get("drivetrain") in DRIVE_MAP else "",
 
         "displacement": displacement_l,
         "horse_power": horsepower,
@@ -251,7 +321,7 @@ def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
         "length_mm": length,
         "width_mm": width,
         "height_mm": height,
-        "wheelbase_mm": None,
+        "wheelbase_mm": wheelbase,
 
         "city_original": detail.get("city", "") or "",
         "city": detail.get("city", "") or "",
@@ -341,6 +411,25 @@ def main() -> None:
             if r.status_code == 200:
                 for row in r.json():
                     metas[row["source_id"]] = row.get("metadata") or {}
+    else:
+        import json as _json
+        import sqlite3 as _sqlite3
+        try:
+            _conn = _sqlite3.connect(DB.SQLITE_PATH)
+            _conn.row_factory = _sqlite3.Row
+            for row in _conn.execute(
+                "SELECT source_id, metadata FROM pending_ids "
+                "WHERE source=? AND source_id IN (" +
+                ",".join("?" * len(ids)) + ")",
+                [SOURCE] + ids,
+            ):
+                md = row["metadata"]
+                metas[row["source_id"]] = (
+                    _json.loads(md) if isinstance(md, str) else (md or {})
+                )
+            _conn.close()
+        except Exception as e:
+            print(f"  SQLite meta load FAIL: {e}")
 
     started = time.time()
     ok = fail = 0
@@ -349,11 +438,13 @@ def main() -> None:
         browser = p.chromium.launch(
             headless=True,
             args=["--disable-blink-features=AutomationControlled",
-                  "--no-sandbox", "--disable-dev-shm-usage"],
+                  "--no-sandbox", "--disable-dev-shm-usage",
+                  "--ignore-certificate-errors"],
         )
         ctx = browser.new_context(user_agent=UA,
                                   viewport={"width": 1366, "height": 768},
-                                  locale="en-US")
+                                  locale="en-US",
+                                  ignore_https_errors=True)
         ctx.add_init_script(
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
         )

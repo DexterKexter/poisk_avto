@@ -1,12 +1,15 @@
 """
 Autocango.com NEW-car listing ID collector.
 
-The /newcar/ section is small (a few hundred SKUs total) so we skip
-filters entirely — no city loop, no price/year minimums — and just walk
-pagination until the page returns zero cars.
+The /newcar/ section is small (~24 cars on the landing page, no real
+pagination) so we just scroll the landing page to trigger any lazy
+content and collect every `a[href*='/sku/newcar-']` link.
+
+Unlike /usedcar/, the newcar grid does NOT use `div.car-item`; cards
+are direct `<a>` elements inside a Vue carousel + grid.
 
 Usage:
-    python collect_autocango_new.py --max-pages 100 --limit 10000
+    python collect_autocango_new.py --limit 10000
 
 Env: SUPABASE_URL, SUPABASE_KEY
 """
@@ -20,43 +23,37 @@ import db as DB
 
 SOURCE = "autocango"
 TYPE_SLUG = "newcar"
-BASE_URL = "https://www.autocango.com"
+LISTING_URL = "https://www.autocango.com/newcar"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/131.0.0.0 Safari/537.36")
 
 
-def build_listing_url(page_num: int) -> str:
-    """Unfiltered /newcar/ listing, optional /page=N suffix."""
-    if page_num <= 1:
-        return f"{BASE_URL}/newcar"
-    return f"{BASE_URL}/newcar/page={page_num}"
-
-
 def extract_cars_js() -> str:
-    """JS that pulls car-items from the rendered newcar listing page."""
+    """JS that collects every newcar link on the page, dedup'd by ACN id."""
     return r"""() => {
-        const cards = Array.from(document.querySelectorAll('div.car-item'));
-        return cards.map(card => {
-            const link = card.querySelector('a[href*="/sku/"]');
-            const href = link ? link.getAttribute('href') : null;
-            const idMatch = href ? href.match(/[A-Z]{2,4}\d{6,10}/) : null;
-            const id = idMatch ? idMatch[0] : null;
+        const seen = new Map();
+        for (const a of document.querySelectorAll("a[href*='/sku/newcar-']")) {
+            const href = a.getAttribute('href');
+            const idMatch = href.match(/ACN\d+/);
+            if (!idMatch) continue;
+            const id = idMatch[0];
+            // Prefer the first occurrence that has the richest text
+            const text = (a.innerText || '').replace(/\s+/g, ' ').trim();
+            if (seen.has(id) && (seen.get(id).text.length >= text.length)) continue;
 
             let brand_slug = null, model_slug = null, type_slug = null;
-            if (href) {
-                const m = href.match(/\/sku\/(newcar|usedcar)-(.+?)-([A-Z]{2,4}\d{6,10})/);
-                if (m) {
-                    type_slug = m[1];
-                    const middle = m[2].split('-');
-                    brand_slug = middle[0];
-                    model_slug = middle.slice(1).join(' ');
-                }
+            const m = href.match(/\/sku\/(newcar|usedcar)-(.+?)-(ACN\d+|ACU\d+|[A-Z]{2,4}\d{6,10})/);
+            if (m) {
+                type_slug = m[1];
+                const middle = m[2].split('-');
+                brand_slug = middle[0];
+                model_slug = middle.slice(1).join(' ');
             }
 
-            const imgs = Array.from(card.querySelectorAll('img'))
-                .map(i => i.src).filter(s => s && !s.startsWith('data:'));
-            const text = (card.innerText || '').replace(/\s+/g, ' ').trim();
+            const imgs = Array.from(a.querySelectorAll('img'))
+                .map(i => i.src).filter(s => s && !s.startsWith('data:'))
+                .map(s => s.split('?')[0]);
 
             let price_usd = null;
             const priceMatch = text.match(/\$([\d,]+)/);
@@ -66,13 +63,15 @@ def extract_cars_js() -> str:
             const cnyMatch = text.match(/¥\s*([\d,]+)/);
             if (cnyMatch) msrp_cny = parseInt(cnyMatch[1].replace(/,/g, ''), 10);
 
-            return {
-                id, href: href ? new URL(href, location.origin).href : null,
+            seen.set(id, {
+                id,
+                href: new URL(href, location.origin).href,
                 type_slug, brand_slug, model_slug,
                 images: imgs.slice(0, 3),
                 text, price_usd, msrp_cny,
-            };
-        }).filter(c => c.id);
+            });
+        }
+        return [...seen.values()];
     }"""
 
 
@@ -105,8 +104,6 @@ def parse_text_fields(text: str) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--max-pages", type=int, default=100,
-                    help="Hard cap on listing pages to fetch")
     ap.add_argument("--limit", type=int, default=10000,
                     help="Max new IDs to upsert total")
     args = ap.parse_args()
@@ -115,7 +112,7 @@ def main() -> None:
 
     print(f"Backend: {DB.backend_name()}")
     print(f"Source: {SOURCE} (type={TYPE_SLUG})")
-    print(f"No filters — walking /newcar/ pagination (max {args.max_pages} pages)\n")
+    print(f"Listing: {LISTING_URL}\n")
 
     print("Loading known IDs cache…")
     known = set()
@@ -135,39 +132,39 @@ def main() -> None:
         browser = p.chromium.launch(
             headless=True,
             args=["--disable-blink-features=AutomationControlled",
-                  "--no-sandbox", "--disable-dev-shm-usage"],
+                  "--no-sandbox", "--disable-dev-shm-usage",
+                  "--ignore-certificate-errors"],
         )
         ctx = browser.new_context(user_agent=UA,
                                   viewport={"width": 1366, "height": 768},
-                                  locale="en-US")
+                                  locale="en-US",
+                                  ignore_https_errors=True)
         ctx.add_init_script(
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
         )
         page = ctx.new_page()
 
-        for n in range(1, args.max_pages + 1):
-            url = build_listing_url(n)
-            try:
-                page.goto(url, wait_until="networkidle", timeout=60_000)
-                page.wait_for_timeout(1200)
-                cars = page.evaluate(extract_cars_js())
-            except Exception as e:
-                print(f"  [p{n}] EXCEPTION: {e}")
-                continue
-            # Defensive: drop any usedcar entries that may slip in
-            cars = [c for c in cars if c.get("type_slug") == TYPE_SLUG]
-            new_on_page = 0
-            for car in cars:
-                cid = car.get("id")
-                if cid and cid not in all_cars:
-                    all_cars[cid] = car
-                    new_on_page += 1
-            elapsed = int(time.time() - started)
-            print(f"  [p{n}] {len(cars)} newcars ({new_on_page} new) "
-                  f"| total unique: {len(all_cars)} | {elapsed}s")
-            if len(cars) == 0:
-                print(f"  no cars on page {n} — end of pagination")
-                break
+        try:
+            page.goto(LISTING_URL, wait_until="networkidle", timeout=60_000)
+            page.wait_for_timeout(1500)
+            # Scroll twice to trigger any lazy-rendered grid content
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1500)
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1500)
+            cars = page.evaluate(extract_cars_js())
+        except Exception as e:
+            print(f"  listing FAIL: {e}")
+            cars = []
+
+        cars = [c for c in cars if c.get("type_slug") == TYPE_SLUG]
+        for car in cars:
+            cid = car.get("id")
+            if cid:
+                all_cars[cid] = car
+
+        elapsed = int(time.time() - started)
+        print(f"  collected {len(cars)} newcars | unique: {len(all_cars)} | {elapsed}s")
 
         browser.close()
 
