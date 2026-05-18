@@ -1,4 +1,7 @@
-"""guazi.com detail-page scraper — direct HTTP, extracts inspection data.
+"""guazi.com detail-page scraper — via Oxylabs Realtime API.
+
+Guazi blocks both direct HTTP and headless playwright with captcha; Oxylabs
+(China geo, render=html) bypasses it cleanly.
 
 Each guazi detail page contains inline JSON (escaped) with detailed inspection
 scorecard:
@@ -11,12 +14,13 @@ VIN is NOT exposed (guazi hides until dealer contact).
 Photos: image-public.guazistatic.com — append `?x-bce-process=...resize,w_1920,h_1280`
 for Full HD.
 
+Env: OXY_USER, OXY_PASS, SUPABASE_URL, SUPABASE_KEY
+
 Usage:
-    python scrape_guazi.py [--limit 1000] [--workers 4]
+    python scrape_guazi.py [--limit 1000] [--workers 8]
 """
 
 import argparse
-import json
 import os
 import re
 import sys
@@ -26,7 +30,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import requests
-from playwright.sync_api import sync_playwright
 
 import db as DB
 
@@ -37,15 +40,13 @@ SOURCE_LANGUAGE = "zh"
 PRICE_CURRENCY = "CNY"
 KM_AGE_UNIT = "km"
 
-UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-HEADERS = {
-    "User-Agent": UA,
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    "Referer": "https://www.guazi.com/",
-}
-
 BASE_URL = "https://www.guazi.com"
+
+OXY_USER = os.environ.get("OXY_USER", "")
+OXY_PASS = os.environ.get("OXY_PASS", "")
+OXY_URL = "https://realtime.oxylabs.io/v1/queries"
+OXY_TIMEOUT = 180
+OXY_MAX_RETRIES = 3
 
 # Photo HD: replace `w_330,h_220` (or any small) → 1920x1280
 PHOTO_HD_TARGET = "?x-bce-process=image/quality,q_95/resize,m_fill,w_1920,h_1280"
@@ -277,53 +278,40 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
     }
 
 
-class WorkerCtx:
-    """Per-thread playwright session — guazi detail pages also have anti-bot."""
-    def __init__(self):
-        self.pw = None
-        self.browser = None
-        self.ctx = None
-        self.page = None
-
-    def __enter__(self):
-        self.pw = sync_playwright().start()
-        self.browser = self.pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-        )
-        self.ctx = self.browser.new_context(
-            user_agent=UA, locale="zh-CN", ignore_https_errors=True,
-            viewport={"width": 1366, "height": 900},
-        )
-        self.ctx.add_init_script(
-            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-        )
-        self.page = self.ctx.new_page()
-        return self.page
-
-    def __exit__(self, *_):
+def oxylabs_fetch(url: str) -> str | None:
+    """Render guazi detail page through Oxylabs (China geo)."""
+    payload = {
+        "source": "universal",
+        "url": url,
+        "geo_location": "China",
+        "locale": "zh-CN",
+        "render": "html",
+    }
+    for attempt in range(OXY_MAX_RETRIES):
         try:
-            self.browser.close()
-        finally:
-            self.pw.stop()
-
-
-def fetch_detail(url: str, page=None) -> str | None:
-    """Fetch via existing playwright page if given, else open fresh."""
-    if page is None:
-        with WorkerCtx() as p:
-            return fetch_detail(url, p)
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-        page.wait_for_timeout(800)
-        if "captcha" in page.url:
-            return None
-        html = page.content()
-        if len(html) < 5000:
-            return None
-        return html
-    except Exception:
-        return None
+            r = requests.post(
+                OXY_URL, auth=(OXY_USER, OXY_PASS),
+                json=payload, timeout=OXY_TIMEOUT,
+            )
+            if r.status_code != 200:
+                time.sleep(2 ** attempt)
+                continue
+            results = r.json().get("results") or []
+            if not results:
+                time.sleep(2 ** attempt)
+                continue
+            content = results[0].get("content") or ""
+            if len(content) < 5000:
+                time.sleep(2 ** attempt)
+                continue
+            # Captcha pages are small or contain known markers
+            if "captcha" in content[:2000].lower():
+                time.sleep(2 ** attempt)
+                continue
+            return content
+        except Exception:
+            time.sleep(2 ** attempt)
+    return None
 
 
 def fetch_pending_rows(limit: int) -> list[dict]:
@@ -341,38 +329,18 @@ def fetch_pending_rows(limit: int) -> list[dict]:
     return [p for p in pending if str(p["source_id"]) not in scraped][:limit]
 
 
-def scrape_batch(rows: list[dict]) -> list[tuple[str, bool, str]]:
-    """Per-batch playwright session. On captcha, restart browser context once."""
-    results: list[tuple[str, bool, str]] = []
-    captcha_streak = 0
-    ctx = WorkerCtx()
-    page = ctx.__enter__()
-    try:
-        for row in rows:
-            clue_id = row["source_id"]
-            meta = row.get("metadata") or {}
-            url = meta.get("url") or f"{BASE_URL}/car-detail/c{clue_id}.html"
-            html = fetch_detail(url, page)
-            if not html:
-                captcha_streak += 1
-                results.append((clue_id, False, "fetch failed"))
-                # 3 fails in a row → recycle browser
-                if captcha_streak >= 3:
-                    ctx.__exit__(None, None, None)
-                    ctx = WorkerCtx()
-                    page = ctx.__enter__()
-                    captcha_streak = 0
-                continue
-            captcha_streak = 0
-            rec = parse_card(html, meta, clue_id)
-            if not rec:
-                results.append((clue_id, False, "parse failed"))
-                continue
-            ok = DB.upsert_car(rec)
-            results.append((clue_id, ok, ""))
-    finally:
-        ctx.__exit__(None, None, None)
-    return results
+def scrape_one(row: dict) -> tuple[str, bool, str]:
+    clue_id = row["source_id"]
+    meta = row.get("metadata") or {}
+    url = meta.get("url") or f"{BASE_URL}/car-detail/c{clue_id}.html"
+    html = oxylabs_fetch(url)
+    if not html:
+        return clue_id, False, "fetch failed"
+    rec = parse_card(html, meta, clue_id)
+    if not rec:
+        return clue_id, False, "parse failed"
+    ok = DB.upsert_car(rec)
+    return clue_id, ok, ""
 
 
 def main() -> None:
@@ -383,18 +351,14 @@ def main() -> None:
 
     if not DB.USE_POSTGRES:
         sys.exit("Need Postgres")
+    if not OXY_USER or not OXY_PASS:
+        sys.exit("Need OXY_USER and OXY_PASS")
 
     pending = fetch_pending_rows(args.limit)
     if not pending:
         print("No pending IDs"); return
-    print(f"Scraping {len(pending)} guazi cards with {args.workers} workers "
-          f"(batches of ~20 per playwright session)")
-
-    # Split pending into batches per worker (one playwright session per batch,
-    # reused for ~20 urls before recycling — keeps cookies fresh but avoids
-    # per-request browser startup cost).
-    BATCH_SIZE = 20
-    batches = [pending[i:i+BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)]
+    print(f"Scraping {len(pending)} guazi cards via Oxylabs "
+          f"({args.workers} workers)")
 
     ok_count = 0
     fail_count = 0
@@ -402,24 +366,24 @@ def main() -> None:
     processed = 0
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(scrape_batch, b): b for b in batches}
+        futs = {ex.submit(scrape_one, r): r for r in pending}
         for fut in as_completed(futs):
             try:
-                results = fut.result()
+                cid, ok, err = fut.result()
             except Exception:
                 traceback.print_exc()
-                fail_count += len(futs[fut])
+                fail_count += 1
                 continue
-            for cid, ok, err in results:
-                processed += 1
-                if ok:
-                    ok_count += 1
-                else:
-                    DB.mark_failed(SOURCE, cid)
-                    fail_count += 1
-            elapsed = int(time.time() - started)
-            print(f"  batch done: {processed}/{len(pending)} "
-                  f"(ok={ok_count}, fail={fail_count}, {elapsed}s)")
+            processed += 1
+            if ok:
+                ok_count += 1
+            else:
+                DB.mark_failed(SOURCE, cid)
+                fail_count += 1
+            if processed % 25 == 0 or processed == len(pending):
+                elapsed = int(time.time() - started)
+                print(f"  {processed}/{len(pending)} "
+                      f"(ok={ok_count}, fail={fail_count}, {elapsed}s)")
 
     elapsed = int(time.time() - started)
     print(f"\nDone in {elapsed}s. OK: {ok_count}, FAIL: {fail_count}")

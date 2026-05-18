@@ -58,11 +58,13 @@ jobs:
             --min-price-cny  ${{ inputs.min_price_cny  || 5000 }} \
             --limit          ${{ inputs.collect_limit  || 15000 }}
 
-      - name: Scrape detail pages (direct HTTP, parallel)
+      - name: Scrape detail pages (via Oxylabs)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          OXY_USER: ${{ secrets.OXY_USER }}
+          OXY_PASS: ${{ secrets.OXY_PASS }}
         run: |
           python scrape_guazi.py \
             --limit   ${{ inputs.scrape_limit || 5000 }} \
-            --workers ${{ inputs.workers      || 4 }}
+            --workers ${{ inputs.workers      || 8 }}
