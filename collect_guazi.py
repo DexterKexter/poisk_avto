@@ -271,9 +271,13 @@ def main() -> None:
     print(f"  filters: year≥{args.min_year}, mileage≤{args.max_mileage_km:,}km, "
           f"price≥¥{args.min_price_cny:,}")
 
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     saved = 0
     skipped = 0
     started = time.time()
+    # Parallel fetch over Oxylabs: 8 in-flight requests per city.
+    WORKERS = 8 if (OXY_USER and OXY_PASS) else 1
 
     for city in cities:
         slug = CITIES[city]
@@ -284,38 +288,47 @@ def main() -> None:
             print(f"  city homepage empty — skip")
             continue
         brand_paths = discover_brand_paths(slug, homepage)
-        print(f"  discovered {len(brand_paths)} brand subpages")
+        print(f"  discovered {len(brand_paths)} brand subpages, "
+              f"fetching {WORKERS}-way parallel")
 
         seen: set[str] = set()
-        # Always scrape the homepage first
-        for path in [""] + brand_paths:
-            if saved >= args.limit:
-                print(f"  reached cap {args.limit}")
-                break
-            url = build_listing_url(slug, path)
-            html = homepage if not path else fetch_html(url)
-            if not html:
-                continue
-            cards = extract_cards(html)
-            page_saved = 0
-            for c in cards:
-                cid = c["clue_id"]
-                if cid in seen:
-                    continue
-                seen.add(cid)
-                ok, _ = card_passes_filters(
-                    c, args.min_year, args.max_mileage_km, args.min_price_cny)
-                if not ok:
-                    skipped += 1
-                    continue
-                if upsert_pending(c):
-                    saved += 1
-                    page_saved += 1
-            elapsed = int(time.time() - started)
-            label = path or "(home)"
-            print(f"  [{label:25}] {len(cards):>3} cards → {page_saved:>3} kept"
-                  f" (city {len(seen)}, all {saved}, {elapsed}s)")
-            time.sleep(0.4)
+        # Process homepage cards first
+        for c in extract_cards(homepage):
+            cid = c["clue_id"]
+            if cid in seen: continue
+            seen.add(cid)
+            ok, _ = card_passes_filters(
+                c, args.min_year, args.max_mileage_km, args.min_price_cny)
+            if not ok:
+                skipped += 1; continue
+            if upsert_pending(c):
+                saved += 1
+
+        # Fetch all brand subpages in parallel
+        urls = [(p, build_listing_url(slug, p)) for p in brand_paths]
+        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            futures = {pool.submit(fetch_html, u): p for p, u in urls}
+            for fut in as_completed(futures):
+                if saved >= args.limit: break
+                path = futures[fut]
+                try: html = fut.result()
+                except Exception: html = None
+                if not html: continue
+                cards = extract_cards(html)
+                page_saved = 0
+                for c in cards:
+                    cid = c["clue_id"]
+                    if cid in seen: continue
+                    seen.add(cid)
+                    ok, _ = card_passes_filters(
+                        c, args.min_year, args.max_mileage_km, args.min_price_cny)
+                    if not ok:
+                        skipped += 1; continue
+                    if upsert_pending(c):
+                        saved += 1; page_saved += 1
+                elapsed = int(time.time() - started)
+                print(f"  [{path[:25]:25}] {len(cards):>3} cards → {page_saved:>3} kept"
+                      f" (city {len(seen)}, all {saved}, {elapsed}s)")
 
     elapsed = int(time.time() - started)
     print(f"\nDone in {elapsed}s. Upserted: {saved}, filtered: {skipped}")
