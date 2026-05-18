@@ -293,6 +293,12 @@ SERIES_MAP = {
     "纳米": "Nano", "纳米06": "Nano 06",
     "星海T5": "Starhai T5", "星海L7": "Starhai L7",
     "IQ傲歌": "Optiq",
+    # Aston Martin V models, Ford CN names, niche RV
+    "V8 Vantage": "V8 Vantage", "V12 Vantage": "V12 Vantage",
+    "DB11": "DB11", "DB12": "DB12", "DBX": "DBX",
+    "游骑侠Ranger": "Ranger", "游骑侠": "Ranger",
+    "沃森威尔1917宿营车": "Watson-Will 1917 Camper",
+    "沃森威尔福特黑武士": "Watson-Will Ford Dark Warrior",
     # Niche / EVs / coupes / tunings / market-mods
     "运动": "Range Rover Sport", "电动MINI": "MINI Electric",
     "纯电GV70": "Electrified GV70",
@@ -494,6 +500,10 @@ SERIES_TO_BRAND = {
     "纳米": "Dongfeng", "纳米06": "Dongfeng",
     "星海T5": "Starhai", "星海L7": "Starhai",
     "IQ傲歌": "Cadillac",
+    "V8 Vantage": "Aston Martin", "V12 Vantage": "Aston Martin",
+    "DB11": "Aston Martin", "DB12": "Aston Martin", "DBX": "Aston Martin",
+    "游骑侠Ranger": "Ford", "游骑侠": "Ford",
+    "沃森威尔1917宿营车": "Watson-Will", "沃森威尔福特黑武士": "Watson-Will",
 }
 
 # Strip these suffix tags from extracted series before SERIES_MAP lookup.
