@@ -203,8 +203,16 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
     photos = extract_photos(html)
     vin = extract_vin(html)
 
-    year, reg_iso = parse_year_month(
+    # year = model year (from "2024款" in carname), reg_date = registration date
+    _, reg_iso = parse_year_month(
         specs.get("regdate_text") or meta.get("regdate"))
+    year_match = re.search(r"(\d{4})\s*款", carname)
+    if year_match:
+        year = int(year_match.group(1))
+    else:
+        # Fall back to registration year if no "XXXX款" pattern
+        year, _ = parse_year_month(
+            specs.get("regdate_text") or meta.get("regdate"))
     mileage_km = (parse_mileage_km(specs.get("mileage_text"))
                   or int(meta.get("mileage_km") or 0) or None)
     # Prefer listing metadata (`万` × 10_000 already computed at collect time)
