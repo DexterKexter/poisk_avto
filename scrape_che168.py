@@ -260,12 +260,18 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
     series_zh = ""
     if carname_for_parse:
         # carname is like "宝马5系 2022款 530Li 尊享型 M运动套装"
-        parts = carname_for_parse.split(" ", 1)
-        series_zh = parts[0]
+        tokens = carname_for_parse.split(" ")
+        series_zh = tokens[0] if tokens else ""
+        # Two-word brand/model stems take precedence ("Model 3", "Model Y",
+        # "Land Rover", "Alfa Romeo", "Rolls-Royce 库里南", etc.)
+        if len(tokens) >= 2:
+            two = f"{tokens[0]} {tokens[1]}"
+            if two in BRAND_MAP or two in SERIES_TO_BRAND:
+                series_zh = two
+                tokens = [two] + tokens[2:]
         # Skip "YYYY款" as series — fall through to next token
-        if re.fullmatch(r"\d{4}款", series_zh) and len(parts) > 1:
-            parts = parts[1].split(" ", 1)
-            series_zh = parts[0]
+        if re.fullmatch(r"\d{4}款", series_zh) and len(tokens) > 1:
+            series_zh = tokens[1]
         # Try to find the Chinese brand prefix (longest match first)
         sorted_prefixes = sorted(BRAND_MAP, key=len, reverse=True)
         for prefix in sorted_prefixes:

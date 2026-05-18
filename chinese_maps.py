@@ -35,7 +35,7 @@ BRAND_MAP = {
     "北京汽车": "BAIC", "北汽新能源": "BAIC BJEV", "北京越野": "BAW",
     "智己": "IM", "智己汽车": "IM",
     "极狐": "ARCFOX", "ARCFOX极狐": "ARCFOX",
-    "埃安": "Aion", "广汽埃安": "Aion",
+    "埃安": "Aion", "广汽埃安": "Aion", "AION": "Aion", "Aion": "Aion",
     "奔腾": "Bestune", "一汽奔腾": "Bestune",
     "岚图": "Voyah", "岚图汽车": "Voyah",
     "捷达": "Jetta",
@@ -269,6 +269,16 @@ SERIES_MAP = {
     "HIACE": "HiAce", "SIENNA": "Sienna", "SUPRA": "Supra",
     "HUMMER": "Hummer",
     "Ghibli": "Ghibli",
+    # Niche / EVs / coupes / tunings / market-mods
+    "运动": "Range Rover Sport", "电动MINI": "MINI Electric",
+    "纯电GV70": "Electrified GV70",
+    "XC60插电式混动": "XC60 PHEV",
+    "GLC轿跑": "GLC Coupe", "宏光V": "Hongguang V",
+    "大切诺基": "Grand Cherokee", "大切诺基4xe": "Grand Cherokee 4xe",
+    "兰德酷路泽(进口)LC76": "Land Cruiser LC76",
+    "依维柯NewDaily房车": "NewDaily Camper",
+    "勇士·战斧": "Warrior Tomahawk",
+    "泰山": "Tai Shan",
 }
 
 # SERIES_TO_BRAND — model-as-brand fallback for CN sources where the listing
@@ -430,6 +440,15 @@ SERIES_TO_BRAND = {
     "尊界S800": "Maextro",
     "智界S7": "Luxeed", "智界R7": "Luxeed",
     "享界S9": "Stelato",
+    # Niche / EVs / coupes / market-mods
+    "运动": "Land Rover", "电动MINI": "MINI",
+    "纯电GV70": "Genesis", "XC60插电式混动": "Volvo",
+    "GLC轿跑": "Mercedes-Benz", "宏光V": "Wuling",
+    "大切诺基": "Jeep", "大切诺基4xe": "Jeep",
+    "兰德酷路泽(进口)LC76": "Toyota",
+    "依维柯NewDaily房车": "Iveco",
+    "勇士·战斧": "BAW", "泰山": "Tank",
+    "Lorinser": "Lorinser", "LUMMA": "LUMMA",
 }
 
 # Strip these suffix tags from extracted series before SERIES_MAP lookup.
