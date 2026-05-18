@@ -39,6 +39,12 @@ BRAND_MAP = {
     "思铭": "Honda", "本田思铭": "Honda",
     "鸿蒙智行": "HIMA",  # Huawei alliance umbrella (sub-brand resolved via SERIES_TO_BRAND)
     "鸿蒙": "HIMA",
+    "广汽本田": "GAC Honda", "理念": "Everus", "本田理念": "Everus",
+    "远程": "Farizon", "远程星享V": "Farizon",  # Geely commercial EV brand
+    "北京汽车": "BAIC", "北京": "BAIC",
+    "ORA": "GWM Ora", "Ora": "GWM Ora",
+    "LYNK&CO": "Lynk & Co", "Lynkco": "Lynk & Co", "LYNKCO": "Lynk & Co",
+    "MI": "Xiaomi", "XIAOMI": "Xiaomi", "ONVO": "Onvo",
     "东风风光": "Dongfeng Fengguang", "风光": "Dongfeng Fengguang",
     "埃安": "Aion", "广汽埃安": "Aion", "AION": "Aion", "Aion": "Aion",
     "奔腾": "Bestune", "一汽奔腾": "Bestune",
