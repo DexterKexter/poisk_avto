@@ -1,0 +1,32 @@
+name: Scrape AutoCango (fleet pricelists)
+
+on:
+  schedule:
+    # Weekly Monday 23:00 UTC = 07:00 Beijing (Tue). Fleet inventory
+    # changes slowly (5 offers/week typical), so once a week is enough.
+    - cron: '0 23 * * 1'
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps + playwright
+        run: |
+          pip install -r requirements-scrapling.txt
+          pip install openpyxl
+          python -m playwright install chromium --with-deps
+
+      - name: Scrape fleet offers + download xlsx pricelists
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python scrape_autocango_fleet.py
