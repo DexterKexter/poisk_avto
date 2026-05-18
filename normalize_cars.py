@@ -44,27 +44,40 @@ def strip_brand_prefix(s: str) -> tuple[str, str]:
 
 
 def normalize_series(series_zh: str, brand_zh: str) -> str:
-    """Strip brand prefix from series, translate 系→Series 级→Class."""
+    """Strip brand prefix from series, translate 系→Series 级→Class.
+
+    If the brand prefix consumed the entire series (e.g. "Cayenne 2024款" where
+    the brand-stem and the series are the same word), keep the original as the
+    model name instead of returning empty.
+    """
     if not series_zh:
         return ""
+    original = series_zh
     # Strip brand prefix if it's there
     if brand_zh and series_zh.startswith(brand_zh):
         series_zh = series_zh[len(brand_zh):]
     else:
-        # Try any other brand prefix
-        _, series_zh = strip_brand_prefix(series_zh)
-    return series_zh.replace("系", " Series").replace("级", " Class").strip()
+        prefix, rest = strip_brand_prefix(series_zh)
+        if prefix:
+            series_zh = rest
+    series_zh = series_zh.replace("系", " Series").replace("级", " Class").strip()
+    return series_zh or original
 
 
 def normalize_row(row: dict) -> dict:
     """Return a delta dict with only fields that should be updated."""
     delta: dict[str, Any] = {}
 
-    # 1. Mark (brand) — from mark_original via BRAND_MAP, longest match
+    # 1. Mark (brand) — from mark_original OR series_original via BRAND_MAP.
+    # che168 listings sometimes drop the brand prefix entirely, so first word
+    # of series_original may itself be a model-as-brand stem (e.g. "Cayenne",
+    # "Elantra", "Model 3", "傲虎").
     mark_orig = row.get("mark_original") or ""
-    if mark_orig:
-        prefix, _ = strip_brand_prefix(mark_orig)
-        new_mark = BRAND_MAP.get(prefix) or BRAND_MAP.get(mark_orig)
+    series_orig_raw = row.get("series_original") or ""
+    candidate = mark_orig or series_orig_raw
+    if candidate:
+        prefix, _ = strip_brand_prefix(candidate)
+        new_mark = BRAND_MAP.get(prefix) or BRAND_MAP.get(candidate)
         if new_mark and new_mark != row.get("mark"):
             delta["mark"] = new_mark
 
@@ -103,15 +116,18 @@ def normalize_row(row: dict) -> dict:
         if new_city and new_city != row.get("city"):
             delta["city"] = new_city
 
-    # 7. Model — only rebuild if it still has Chinese chars AND we have mark + series
+    # 7. Model — rebuild if (a) has Chinese chars OR (b) is missing the brand prefix
     cur_model = row.get("model") or ""
-    series_orig = row.get("series_original") or ""
     target_mark = delta.get("mark") or row.get("mark")
-    if HAS_CN.search(cur_model) and target_mark and series_orig:
-        cleaned = normalize_series(series_orig, mark_orig)
+    if target_mark and series_orig_raw:
+        cleaned = normalize_series(series_orig_raw, mark_orig)
         if cleaned and not HAS_CN.search(cleaned):
             new_model = f"{target_mark} {cleaned}".strip()
-            if new_model != cur_model:
+            need_rebuild = (
+                HAS_CN.search(cur_model)
+                or not cur_model.startswith(target_mark)
+            )
+            if need_rebuild and new_model != cur_model:
                 delta["model"] = new_model
 
     return delta
