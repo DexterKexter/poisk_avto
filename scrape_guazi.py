@@ -179,6 +179,13 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
     short_title = full_title.split("报价")[0].strip()
     short_title = re.sub(r"【[^】]*】", "", short_title)
     short_title = short_title.replace("二手", "")
+    # Strip guazi SEO scaffolding: "...车价格-X.XX万公里...", "...车能卖多少钱",
+    # "...车成交价查询-", "- 瓜子车", "- 卖车上瓜子,..."
+    short_title = re.sub(r"\s*-\s*(瓜子车|卖车上瓜子.*)$", "", short_title)
+    short_title = re.sub(r"车价格-[\d.]+万公里", " ", short_title)
+    short_title = re.sub(r"车成交价查询-", " ", short_title)
+    short_title = re.sub(r"车能卖多少钱.*", "", short_title)
+    short_title = re.sub(r"车值多少钱.*", "", short_title)
     short_title = re.sub(r"\s+", " ", short_title).strip()
     parts = short_title.split(" ", 1) if " " in short_title else [short_title, ""]
     brand_zh = parts[0] if parts else ""

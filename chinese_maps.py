@@ -35,6 +35,8 @@ BRAND_MAP = {
     "北京汽车": "BAIC", "北汽新能源": "BAIC BJEV", "北京越野": "BAW",
     "智己": "IM", "智己汽车": "IM",
     "极狐": "ARCFOX", "ARCFOX极狐": "ARCFOX",
+    "思皓": "Sehol", "凌宝汽车": "Lingbao", "凌宝": "Lingbao",
+    "东风风光": "Dongfeng Fengguang", "风光": "Dongfeng Fengguang",
     "埃安": "Aion", "广汽埃安": "Aion", "AION": "Aion", "Aion": "Aion",
     "奔腾": "Bestune", "一汽奔腾": "Bestune",
     "岚图": "Voyah", "岚图汽车": "Voyah",
@@ -269,6 +271,20 @@ SERIES_MAP = {
     "HIACE": "HiAce", "SIENNA": "Sienna", "SUPRA": "Supra",
     "HUMMER": "Hummer",
     "Ghibli": "Ghibli",
+    # Micro-EV / niche city EVs
+    "熊猫mini": "Panda Mini", "花仙子": "Hongguang Flower Fairy",
+    "花仙子款": "Hongguang Flower Fairy",
+    "黑猫": "Ora Black Cat", "白猫": "Ora White Cat",
+    "小马": "Pony EV", "小虎EV": "Xiaohu EV",
+    "QQ冰淇淋": "QQ Ice Cream", "纳米EX1": "Nano Box EX1",
+    "阿尔法T": "Alpha T", "阿尔法S": "Alpha S", "阿尔法T(ARCFOX": "Alpha T",
+    "风光MINI EV": "Fengguang Mini EV",
+    "赛那SIENNA": "Sienna",
+    "迈腾GTE PHEV": "Magotan GTE PHEV", "迈腾GTE": "Magotan GTE",
+    "ARIYA艾睿雅": "Ariya", "艾睿雅": "Ariya",
+    "E萤火虫": "Firefly", "萤火虫": "Firefly",
+    "FOR-Four乖乖虎": "ForFour",
+    "蓝气球": "Blue Balloon", "至境世家": "Galaxy Family",
     # Niche / EVs / coupes / tunings / market-mods
     "运动": "Range Rover Sport", "电动MINI": "MINI Electric",
     "纯电GV70": "Electrified GV70",
@@ -449,6 +465,20 @@ SERIES_TO_BRAND = {
     "依维柯NewDaily房车": "Iveco",
     "勇士·战斧": "BAW", "泰山": "Tank",
     "Lorinser": "Lorinser", "LUMMA": "LUMMA",
+    # Micro-EV crossover (carname often without parent brand)
+    "熊猫mini": "Geely", "花仙子": "Geely", "花仙子款": "Geely",
+    "黑猫": "GWM Ora", "白猫": "GWM Ora",
+    "小马": "Pony", "小虎EV": "Pony",
+    "QQ冰淇淋": "Chery", "纳米EX1": "Dongfeng",
+    "阿尔法T": "ARCFOX", "阿尔法S": "ARCFOX", "阿尔法T(ARCFOX": "ARCFOX",
+    "风光MINI EV": "Dongfeng Fengguang",
+    "赛那SIENNA": "Toyota",
+    "迈腾GTE PHEV": "Volkswagen", "迈腾GTE": "Volkswagen",
+    "ARIYA艾睿雅": "Nissan", "艾睿雅": "Nissan",
+    "E萤火虫": "NIO", "萤火虫": "NIO",
+    "FOR-Four乖乖虎": "Smart",
+    "蓝气球": "Smart",  # Smart Blue Balloon special edition
+    "至境世家": "Geely",  # Geely Galaxy
 }
 
 # Strip these suffix tags from extracted series before SERIES_MAP lookup.
@@ -465,7 +495,7 @@ COLOR_MAP = {
     "棕色": "Brown", "咖啡色": "Brown",
     "橙色": "Orange", "黄色": "Yellow", "绿色": "Green",
     "紫色": "Purple", "香槟色": "Champagne", "金色": "Gold", "粉色": "Pink",
-    "米色": "Beige", "其他": "Other",
+    "米色": "Beige", "其他": "Other", "其它": "Other",
 }
 
 FUEL_MAP = {
