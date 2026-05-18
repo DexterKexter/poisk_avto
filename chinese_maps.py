@@ -62,12 +62,26 @@ BRAND_MAP = {
     "迈凯伦": "McLaren", "布加迪": "Bugatti", "柯尼塞格": "Koenigsegg",
     "哪吒": "Neta", "哪吒汽车": "Neta", "高合": "HiPhi",
     "欧拉": "ORA", "欧拉汽车": "ORA",
-    # Common CN model-as-brand prefixes (che168 sometimes drops parent brand)
+    # CN/EN model-as-brand prefixes (che168 sometimes drops parent brand)
     "揽胜": "Land Rover", "卫士": "Land Rover", "发现": "Land Rover",
     "坦途": "Toyota", "陆地巡洋舰": "Toyota", "霸道": "Toyota",
     "途乐": "Nissan", "贵士": "Nissan",
     "Macan新能源": "Porsche", "卡宴": "Porsche",
+    "Cayenne": "Porsche", "Macan": "Porsche", "Panamera": "Porsche",
+    "Taycan": "Porsche", "Boxster": "Porsche", "Cayman": "Porsche",
     "迈巴赫": "Mercedes-Maybach",
+    # Tesla (carname like "Model 3 2024款...")
+    "Model 3": "Tesla", "Model Y": "Tesla", "Model S": "Tesla", "Model X": "Tesla",
+    # Hyundai
+    "Elantra": "Hyundai", "Tucson": "Hyundai", "Santa Fe": "Hyundai",
+    "Sonata": "Hyundai", "Mistra": "Hyundai", "ix35": "Hyundai",
+    "途胜": "Hyundai", "伊兰特": "Hyundai",
+    # Subaru
+    "傲虎": "Subaru", "力狮": "Subaru", "森林人": "Subaru",
+    "翼豹": "Subaru", "BRZ": "Subaru",
+    # Niche / luxury imports
+    "摩根": "Morgan", "悍马": "Hummer", "Hummer": "Hummer",
+    "莲花": "Lotus", "Lotus": "Lotus",
 }
 
 COLOR_MAP = {
