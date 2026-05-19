@@ -318,6 +318,51 @@ SERIES_MAP = {
     "依维柯NewDaily房车": "NewDaily Camper",
     "勇士·战斧": "Warrior Tomahawk",
     "泰山": "Tai Shan",
+    # — additions for the leftover CJK rows the normalizer didn't catch —
+    # Geely Galaxy: Xingyuan compact EV
+    "星愿": "Galaxy Xingyuan",
+    # Honda China sub-brands (Everus + GAC Honda new energy)
+    "本田M-NV": "M-NV", "本田X-NV": "X-NV",
+    "四驱长续航Max": "AWD Long Range Max",  # complectation leak, lift to model
+    "猎光e:NS2": "e:NS2",
+    # Hyundai
+    "库斯途": "Custo",
+    # Onvo (NIO sub-brand)
+    "乐道L90": "L90",
+    # Geely Forthing / Dongfeng Fengxing
+    "风行T5": "Forthing T5",
+    # Foton SAIC mini-truck/van
+    "小海狮X30": "Mini Sea Lion X30",
+    # World Hightech Auto (世极)
+    "世极": "Shiji",
+    # Mitsubishi
+    "欧蓝德": "Outlander",
+    # Volkswagen China
+    "途观L": "Tiguan L",
+    # Maserati
+    "Grecale格雷嘉": "Grecale",
+    # Bentley
+    "飞驰插电混动": "Flying Spur PHEV", "飞驰插电式混动": "Flying Spur PHEV",
+    # BYD Tang series suffixes
+    "唐新能源": "Tang EV",
+    # Exeed
+    "凌云": "Lingyun",
+    # Ora (Great Wall)
+    "好猫": "Funky Cat",
+    # Baojun
+    "云朵": "Yunduo", "悦也Plus": "Yueye Plus",
+    # Farizon
+    "星享V6E": "Xingxiang V6E",
+    # Roewe
+    "i6经典": "i6 Classic",
+    # Skoda
+    "柯珞克": "Karoq",
+    # JMC
+    "集团新能源": "Group EV", "集团 EV": "Group EV",
+    # Volvo PHEV variants (clean leak)
+    "S90插电式混动": "S90 PHEV", "XC70插电式混动": "XC70 PHEV",
+    # Generic ничего-не-говорящий "新能源" leaked as series — leave un-translated
+    # so frontend treats it as missing model
 }
 
 # SERIES_TO_BRAND — model-as-brand fallback for CN sources where the listing
@@ -461,7 +506,19 @@ SERIES_TO_BRAND = {
     "斯泰尔维奥": "Alfa Romeo",
     "阿特兹": "Mazda", "昂克赛拉": "Mazda", "CX-50行也": "Mazda",
     "Evora": "Lotus", "Elise": "Lotus", "Eletre": "Lotus",
-    "Emira": "Lotus", "Emeya": "Lotus",
+    "Emira": "Lotus", "Emeya": "Lotus", "EMEYA": "Lotus",
+    # — additions to recover the 12 mark-less rows —
+    "唐新能源": "BYD",
+    "库斯途": "Hyundai",
+    "飞驰插电混动": "Bentley", "飞驰插电式混动": "Bentley",
+    "Grecale格雷嘉": "Maserati",
+    "途观L": "Volkswagen",
+    "NewDaily房车": "Iveco",
+    "乐道L90": "Onvo",
+    "风行T5": "Geely Forthing",
+    "小海狮X30": "Foton",
+    "世极": "Shiji",  # niche Chinese EV brand
+    "欧蓝德": "Mitsubishi",
     "HUMMER": "Hummer", "悍马": "Hummer",
     # Changan / JAC / Dongfeng / Brilliance / Aion
     "奔奔": "Changan", "奔奔E-Star": "Changan",
