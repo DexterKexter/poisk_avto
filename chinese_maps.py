@@ -537,6 +537,12 @@ FUEL_MAP = {
     "纯电动": "Electric",
     "混合动力": "Hybrid", "油电混合": "Hybrid", "插电混动": "PHEV",
     "插电式混合动力": "PHEV", "增程式": "EREV", "增程": "EREV",
+    # Synonyms for series-hybrid that arrive already Latin-encoded from
+    # some sources (e.g. autocango). REEV ("Range-Extended EV") is the
+    # same physical configuration as EREV — engine acts as generator only,
+    # wheels driven by motor. Customs-wise this matters: in KZ from
+    # Jan 2026 EREV pays 0% duty, classic HEV/PHEV pays full ~15%.
+    "REEV": "EREV", "Reev": "EREV", "EREV": "EREV",
     "氢燃料": "Hydrogen", "天然气": "CNG",
 }
 
