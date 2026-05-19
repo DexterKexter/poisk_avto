@@ -41,9 +41,10 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           ARGS=""
-          # Push-triggered run = smoke-test (10 cars). Manual run honours inputs.
+          # Push-triggered = full backfill on che168 (the only source with
+          # autoimg.cn URLs). Manual dispatch honours its inputs.
           if [ "${{ github.event_name }}" = "push" ]; then
-            ARGS="--limit 10 --source che168"
+            ARGS="--source che168"
           else
             if [ -n "${{ inputs.limit }}" ];  then ARGS="$ARGS --limit ${{ inputs.limit }}";   fi
             if [ -n "${{ inputs.source }}" ]; then ARGS="$ARGS --source ${{ inputs.source }}"; fi
