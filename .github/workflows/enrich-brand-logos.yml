@@ -1,0 +1,35 @@
+name: Enrich brand logos (autocango)
+
+# Visit each autocango brand page and pull the brand badge image
+# (i1.autocango.com/brand/CODE.webp). Idempotent — only touches rows
+# where logo_url IS NULL. Trigger manually.
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Max brands to process'
+        required: false
+        default: '400'
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps + playwright
+        run: |
+          pip install -r requirements-scrapling.txt
+          python -m playwright install chromium --with-deps
+
+      - name: Enrich logos
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python enrich_brand_logos.py --limit ${{ inputs.limit }}
