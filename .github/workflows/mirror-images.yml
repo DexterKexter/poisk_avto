@@ -11,6 +11,12 @@ on:
         description: "Restrict to single source (e.g. che168)"
         required: false
         default: ""
+  # Auto-run on this branch when the mirror script changes (until merged to main)
+  push:
+    branches: [claude/new-session-LVrLC]
+    paths:
+      - mirror_images.py
+      - .github/workflows/mirror-images.yml
 
 permissions:
   contents: read
@@ -35,6 +41,11 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           ARGS=""
-          if [ -n "${{ inputs.limit }}" ];  then ARGS="$ARGS --limit ${{ inputs.limit }}";   fi
-          if [ -n "${{ inputs.source }}" ]; then ARGS="$ARGS --source ${{ inputs.source }}"; fi
+          # Push-triggered run = smoke-test (10 cars). Manual run honours inputs.
+          if [ "${{ github.event_name }}" = "push" ]; then
+            ARGS="--limit 10 --source che168"
+          else
+            if [ -n "${{ inputs.limit }}" ];  then ARGS="$ARGS --limit ${{ inputs.limit }}";   fi
+            if [ -n "${{ inputs.source }}" ]; then ARGS="$ARGS --source ${{ inputs.source }}"; fi
+          fi
           python mirror_images.py --workers 6 $ARGS
