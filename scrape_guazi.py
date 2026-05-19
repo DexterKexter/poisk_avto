@@ -240,8 +240,14 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
     source_data = {k: v for k, v in source_data.items() if v is not None}
 
     detail_url = meta.get("url") or f"{BASE_URL}/car-detail/c{clue_id}.html"
-    city_en = meta.get("city")  # listing city (where displayed)
+    city_raw = meta.get("city") or ""
+    # Defensive: pending rows from older collectors may still carry raw Chinese.
+    city_en = CITY_MAP.get(city_raw, city_raw)
     city_zh = next((zh for zh, en in CITY_MAP.items() if en == city_en), "")
+    # If we couldn't translate (city stayed Chinese), keep that as city_zh too.
+    if not city_zh and re.search(r"[一-龥]", city_raw):
+        city_zh = city_raw
+        city_en = None
 
     ts = DB.now_iso()
     return {

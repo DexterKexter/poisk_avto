@@ -38,15 +38,40 @@ import db as DB
 sys.stdout.reconfigure(line_buffering=True)
 
 BUCKET = "car-images"
-BLOCKED_HOST_SUBSTRING = "autoimg.cn"  # the host pattern we mirror (Chrome ORB)
+# Hosts whose images we mirror because they return 403/blocked from non-CN IPs
+# (typical for KZ/RU end users). che168 lives on autoimg.cn (Chrome ORB block),
+# autocango on i1.autocango.com (geo-restricted to mainland), guazi photos are
+# currently world-readable but we mirror as a future-proof safety net.
+BLOCKED_HOST_SUBSTRINGS = (
+    "autoimg.cn",            # che168
+    "i1.autocango.com",      # autocango
+    "image-public.guazistatic.com",  # guazi (defensive)
+    "image-pub.guazistatic.com",
+)
+# Per-host referer override — sites check Referer against their own domain
+REFERER_BY_HOST = {
+    "autoimg.cn":                    "https://www.autohome.com.cn/",
+    "i1.autocango.com":              "https://www.autocango.com/",
+    "image-public.guazistatic.com":  "https://www.guazi.com/",
+    "image-pub.guazistatic.com":     "https://www.guazi.com/",
+}
 PUBLIC_URL = f"{DB.SUPABASE_URL}/storage/v1/object/public/{BUCKET}"
-DOWNLOAD_HEADERS = {
+BASE_DOWNLOAD_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
                    "Chrome/131.0.0.0 Safari/537.36"),
-    "Referer": "https://www.autohome.com.cn/",
     "Accept": "image/avif,image/webp,image/jpeg,image/png,*/*;q=0.8",
 }
+
+
+def _headers_for(url: str) -> dict:
+    """Pick UA+Referer headers appropriate for the host."""
+    h = dict(BASE_DOWNLOAD_HEADERS)
+    for host_substr, referer in REFERER_BY_HOST.items():
+        if host_substr in url:
+            h["Referer"] = referer
+            break
+    return h
 
 EXT_BY_MIME = {
     "image/jpeg": "jpg", "image/jpg": "jpg",
@@ -74,7 +99,7 @@ def _storage_headers(content_type: str | None = None) -> dict:
 def mirror_one(orig_url: str, dst_path: str) -> str | None:
     """Download orig_url and PUT into Storage. Return public URL or None."""
     try:
-        r = requests.get(orig_url, headers=DOWNLOAD_HEADERS, timeout=30,
+        r = requests.get(orig_url, headers=_headers_for(orig_url), timeout=30,
                          allow_redirects=True)
     except Exception as e:
         print(f"  ! GET fail {orig_url}: {e}", flush=True)
@@ -101,8 +126,12 @@ def mirror_one(orig_url: str, dst_path: str) -> str | None:
     return f"{PUBLIC_URL}/{final_path}"
 
 
+def _is_blocked(url: str) -> bool:
+    return any(h in url for h in BLOCKED_HOST_SUBSTRINGS)
+
+
 def needs_mirror(images: list[str]) -> bool:
-    return any(BLOCKED_HOST_SUBSTRING in (u or "") for u in images)
+    return any(_is_blocked(u or "") for u in images)
 
 
 def mirror_car(car: dict) -> tuple[int, int]:
@@ -115,7 +144,7 @@ def mirror_car(car: dict) -> tuple[int, int]:
     succeeded = 0
     blocked_total = 0
     for idx, url in enumerate(images):
-        if not url or BLOCKED_HOST_SUBSTRING not in url:
+        if not url or not _is_blocked(url):
             continue
         blocked_total += 1
         # extension hint from URL
@@ -149,12 +178,13 @@ def fetch_cars_to_mirror(limit: int | None, source_filter: str | None
     select = "source,source_id,images"
     # No order: we paginate by offset and don't need recency ordering.
     params = ["select=" + select]
-    # autoimg.cn URLs come from che168 (and historically autohome). Cap
-    # the query to those sources unless caller asked for something else.
+    # Blocked image hosts now span che168, autocango, guazi (see
+    # BLOCKED_HOST_SUBSTRINGS). When no source filter is given, scan all
+    # candidate sources.
     if source_filter:
         params.append(f"source=eq.{source_filter}")
     else:
-        params.append("source=in.(che168,autohome)")
+        params.append("source=in.(che168,autohome,autocango,guazi)")
     # Pull in pages of 1000 (PostgREST default ceiling).
     page_size = 1000
     offset = 0

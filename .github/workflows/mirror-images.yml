@@ -1,6 +1,11 @@
 name: Mirror blocked images to Supabase Storage
 
 on:
+  # Run daily at 23:30 UTC, after the day's scrapers have settled.
+  # Mirrors photos for che168, autocango, and guazi (whose CDNs are blocked
+  # or rate-limited for non-CN viewers).
+  schedule:
+    - cron: '30 23 * * *'
   workflow_dispatch:
     inputs:
       limit:

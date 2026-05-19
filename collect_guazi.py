@@ -21,6 +21,7 @@ import requests
 from playwright.sync_api import sync_playwright
 
 import db as DB
+from chinese_maps import CITY_MAP
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -106,7 +107,8 @@ def extract_cards(html: str) -> list[dict]:
             if km:
                 mileage_km = int(float(km.group(1)) * 10_000); continue
             if re.search(r"[一-龥]", p):
-                city = p
+                # Translate Chinese city → English so downstream cars.city is clean.
+                city = CITY_MAP.get(p, p)
         tags = re.findall(r"<span[^>]*>([^<]+)</span>",
                           tags_m.group(1) if tags_m else "")
         out.append({
