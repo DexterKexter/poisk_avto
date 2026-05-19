@@ -45,6 +45,8 @@ SOURCE_LANGUAGE = "ko"
 PRICE_CURRENCY = "KRW"
 KM_AGE_UNIT = "km"
 IMAGE_BASE = "https://ci.encar.com"
+# Encar serves Full HD when we append this impolicy. Without it photos are 640×360.
+IMAGE_HD_QS = "?impolicy=heightRate&rh=1080&cw=1920&ch=1080&cg=Center"
 CARD_URL_TPL = "https://fem.encar.com/cars/detail/{id}"
 
 API_URL = "https://api.encar.com/v1/readside/vehicles"
@@ -66,6 +68,11 @@ COLOR_MAP = {
     "갈색": "Brown", "고동색": "Dark Brown", "베이지": "Beige",
     "와인색": "Wine", "보라색": "Purple", "분홍색": "Pink",
     "금색": "Gold", "기타": "Other",
+    # Variants seen in live encar data
+    "청색": "Blue", "은회색": "Silver", "빨간색": "Red",
+    "담녹색": "Green", "노란색": "Yellow", "연금색": "Gold",
+    "명은색": "Silver", "진주투톤": "Pearl Two-Tone", "은하색": "Silver",
+    "청옥색": "Blue", "연두색": "Green", "갈대색": "Beige",
 }
 
 FUEL_MAP = {
@@ -74,6 +81,8 @@ FUEL_MAP = {
     "하이브리드": "Hybrid", "가솔린+하이브리드": "Hybrid",
     "디젤+하이브리드": "Hybrid", "LPG+하이브리드": "Hybrid",
     "가솔린+전기": "PHEV", "디젤+전기": "PHEV",
+    # Variants
+    "LPG(일반인 구입)": "LPG", "가솔린+LPG": "Petrol + LPG",
 }
 
 TRANSMISSION_MAP = {
@@ -90,6 +99,8 @@ BODY_MAP = {
     "SUV": "SUV", "RV": "SUV",
     "미니밴": "Minivan", "승합차": "Minivan", "밴": "Minivan",
     "픽업트럭": "Pickup", "트럭": "Truck", "버스": "Bus",
+    # Variants
+    "화물차": "Truck", "경승합차": "Mini Van",
 }
 
 # Korean province codes (first word of contact.address)
@@ -160,11 +171,20 @@ def parse_car(api_car: dict) -> dict | None:
         year = int(year_month[:4]) if year_month[:4].isdigit() else None
 
         price_wan = advertisement.get("price")
-        price = price_wan * 10000 if isinstance(price_wan, (int, float)) else None
-
         new_price_wan = category.get("originPrice")
         new_price = (new_price_wan * 10000
                      if isinstance(new_price_wan, (int, float)) else None)
+        # encar uses 99999 (만원) as "협의/문의" placeholder. Below 150만원
+        # ($108) AND/OR used < 5% of new = auction down-payments / wholesale
+        # leftovers, not real consumer prices.
+        price = None
+        if isinstance(price_wan, (int, float)) and 150 <= price_wan < 99999:
+            if (new_price_wan and isinstance(new_price_wan, (int, float))
+                    and new_price_wan > 0
+                    and price_wan < new_price_wan * 0.05):
+                price = None
+            else:
+                price = price_wan * 10000
 
         mileage = spec.get("mileage")
 
@@ -176,7 +196,7 @@ def parse_car(api_car: dict) -> dict | None:
         address = contact.get("address", "") or ""
         region_kr = address.split(" ")[0] if address else ""
 
-        image_urls = [f"{IMAGE_BASE}{p['path']}" for p in photos
+        image_urls = [f"{IMAGE_BASE}{p['path']}{IMAGE_HD_QS}" for p in photos
                       if isinstance(p, dict) and p.get("path")]
 
         dealer = partnership.get("dealer") or {}
@@ -184,6 +204,16 @@ def parse_car(api_car: dict) -> dict | None:
 
         mark_orig = category.get("manufacturerName", "")
         mark_en = category.get("manufacturerEnglishName") or mark_orig
+        # encar concatenates historical legal-entity names ("ChevroletGMDaewoo",
+        # "Renault-KoreaSamsung", "KG_Mobility_Ssangyong", "Citroen-DS").
+        # Normalize to the current consumer-facing brand.
+        ENCAR_BRAND_ALIASES = {
+            "ChevroletGMDaewoo": "Chevrolet",
+            "Renault-KoreaSamsung": "Renault Korea",
+            "KG_Mobility_Ssangyong": "KG Mobility",
+            "Citroen-DS": "Citroen",
+        }
+        mark_en = ENCAR_BRAND_ALIASES.get(mark_en, mark_en)
         model_group_en = category.get("modelGroupEnglishName", "")
         grade_en = category.get("gradeEnglishName", "")
         model_str = " ".join(x for x in (model_group_en, grade_en) if x).strip()
@@ -199,8 +229,10 @@ def parse_car(api_car: dict) -> dict | None:
 
             "mark_original": mark_orig,
             "mark": mark_en,
-            "series_original": category.get("modelName", ""),
-            "model": model_str or category.get("modelName", ""),
+            # Use English series for display — Korean modelName goes nowhere
+            # visible (frontend reads series_original directly).
+            "series_original": model_group_en or category.get("modelName", ""),
+            "model": model_str or model_group_en or category.get("modelName", ""),
             "complectation": grade_en or category.get("gradeName", ""),
             "year": year,
 

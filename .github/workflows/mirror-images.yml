@@ -1,0 +1,40 @@
+name: Mirror blocked images to Supabase Storage
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max cars to process (blank = all)"
+        required: false
+        default: ""
+      source:
+        description: "Restrict to single source (e.g. che168)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install requests
+
+      - name: Run mirror
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          ARGS=""
+          if [ -n "${{ inputs.limit }}" ];  then ARGS="$ARGS --limit ${{ inputs.limit }}";   fi
+          if [ -n "${{ inputs.source }}" ]; then ARGS="$ARGS --source ${{ inputs.source }}"; fi
+          python mirror_images.py --workers 6 $ARGS

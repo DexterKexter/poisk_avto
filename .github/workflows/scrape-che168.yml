@@ -2,8 +2,9 @@ name: Scrape che168
 
 on:
   schedule:
-    # Daily 19:30 UTC = 03:30 Beijing
-    - cron: '30 19 * * *'
+    # Every 4 hours at :15 (offset from encar :00 to spread CI load).
+    # Detail-scrape can hit 60-90 min, so 4h cadence leaves a safe gap.
+    - cron: '15 */4 * * *'
   workflow_dispatch:
     inputs:
       cities:
@@ -31,6 +32,10 @@ on:
       workers:
         required: false
         default: '4'
+
+concurrency:
+  group: scrape-che168
+  cancel-in-progress: false
 
 jobs:
   scrape:
@@ -67,3 +72,14 @@ jobs:
           python scrape_che168.py \
             --limit   ${{ inputs.scrape_limit || 3000 }} \
             --workers ${{ inputs.workers      || 4 }}
+
+      # autoimg.cn ships images without Cross-Origin-Resource-Policy,
+      # which Chrome ORB blocks in <img>/<Image>. Re-host every fresh
+      # listing's photos in Supabase Storage so they render in browsers.
+      # Idempotent: a car whose images are already on our CDN is skipped.
+      - name: Mirror blocked images to Supabase Storage
+        if: always()  # run even if scrape step failed for some rows
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python mirror_images.py --source che168 --workers 6
