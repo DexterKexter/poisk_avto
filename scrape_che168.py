@@ -169,7 +169,10 @@ SPEC_FIELDS = {
     "transfers_text":   r"过户次数[\s\S]{0,80}?(\d+)\s*次",
     "color":            r"车身颜色[\s\S]{0,120}?([一-龥]{1,8}色)",
     "drive_type_zh":    r"驱动方式[\s\S]{0,120}?([一-龥]{2,12})",
-    "transmission_zh":  r"变速箱[\s\S]{0,120}?([一-龥A-Za-z]{1,10})",
+    # che168 detail page exposes transmission in a combined "挡位 / 排量" cell
+    # like `<p>挡位 / 排量</p><h4>自动 / 2L</h4>`. The legacy 变速箱 label
+    # doesn't exist on the page — keep the new pattern only.
+    "transmission_zh":  r"挡位\s*/\s*排量[\s\S]{0,120}?<h4>([一-龥A-Za-z]{1,8})\s*/\s*[\d.]+\s*[LT]",
     "fuel_zh":          r"燃料类型[\s\S]{0,120}?([一-龥]{1,8})",
     "emission":         r"排放标准[\s\S]{0,120}?(国\s*[一-龥VI]{1,5})",
     "displacement":     r"排量[\s\S]{0,80}?([\d.]+\s*[TL])",
@@ -297,15 +300,28 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
     series_en = series_zh.replace("系", " Series").replace("级", " Class").strip()
     series_en = translate_series(series_en) or series_en
 
-    # Drive / transmission / fuel — translate. Regex on che168 detail page
-    # can pull description fragments ("运转良好" etc) when 变速箱 appears in
-    # text outside the spec block. Validate against the canonical map.
+    # Drive / transmission / fuel — translate. che168 detail page can leak
+    # description fragments into raw matches; validate against canonical maps.
     drive_zh = specs.get("drive_type_zh", "")
     drive_zh = drive_zh if drive_zh in DRIVE_MAP else ""
     trans_zh = specs.get("transmission_zh", "")
     trans_zh = trans_zh if trans_zh in TRANSMISSION_MAP else ""
     fuel_zh = specs.get("fuel_zh", "")
     fuel_zh = fuel_zh if fuel_zh in FUEL_MAP else ""
+    # Fuel inference: 燃料类型 is only printed for EVs/PHEVs on che168.
+    # For ICE the "挡位 / 排量" cell holds something like "自动 / 2L" — any
+    # non-zero displacement → Petrol (Diesel is rare and never labelled here).
+    if not fuel_zh:
+        disp_raw = specs.get("displacement", "")
+        disp_match = re.search(r"([\d.]+)", disp_raw)
+        if disp_match:
+            try:
+                if float(disp_match.group(1)) > 0:
+                    fuel_zh = "汽油"
+                else:
+                    fuel_zh = "纯电动"
+            except ValueError:
+                pass
 
     transfers = parse_int(specs.get("transfers_text"))
 
