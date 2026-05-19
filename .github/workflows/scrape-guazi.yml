@@ -30,7 +30,7 @@ on:
         default: '5000'
       workers:
         required: false
-        default: '4'
+        default: '8'
 
 concurrency:
   group: scrape-guazi
@@ -45,17 +45,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install deps + playwright
-        run: |
-          pip install -r requirements-scrapling.txt
-          python -m playwright install chromium --with-deps
+      - name: Install deps
+        run: pip install -r requirements.txt
 
       - name: Collect listings (6 cities + filters)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          OXY_USER: ${{ secrets.OXY_USER }}
-          OXY_PASS: ${{ secrets.OXY_PASS }}
         run: |
           python collect_guazi.py \
             --cities         "${{ inputs.cities         || 'Beijing,Shanghai,Guangzhou,Shenzhen,Chengdu,Hangzhou' }}" \
@@ -65,12 +61,10 @@ jobs:
             --min-price-cny  ${{ inputs.min_price_cny  || 5000 }} \
             --limit          ${{ inputs.collect_limit  || 15000 }}
 
-      - name: Scrape detail pages (via Oxylabs)
+      - name: Scrape detail pages (direct HTTP, parallel)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-          OXY_USER: ${{ secrets.OXY_USER }}
-          OXY_PASS: ${{ secrets.OXY_PASS }}
         run: |
           python scrape_guazi.py \
             --limit   ${{ inputs.scrape_limit || 5000 }} \

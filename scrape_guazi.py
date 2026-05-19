@@ -1,7 +1,4 @@
-"""guazi.com detail-page scraper — via Oxylabs Realtime API.
-
-Guazi blocks both direct HTTP and headless playwright with captcha; Oxylabs
-(China geo, render=html) bypasses it cleanly.
+"""guazi.com detail-page scraper — direct HTTP, extracts inspection data.
 
 Each guazi detail page contains inline JSON (escaped) with detailed inspection
 scorecard:
@@ -14,13 +11,12 @@ VIN is NOT exposed (guazi hides until dealer contact).
 Photos: image-public.guazistatic.com — append `?x-bce-process=...resize,w_1920,h_1280`
 for Full HD.
 
-Env: OXY_USER, OXY_PASS, SUPABASE_URL, SUPABASE_KEY
-
 Usage:
-    python scrape_guazi.py [--limit 1000] [--workers 8]
+    python scrape_guazi.py [--limit 1000] [--workers 4]
 """
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -30,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import requests
+from playwright.sync_api import sync_playwright
 
 import db as DB
 
@@ -40,48 +37,22 @@ SOURCE_LANGUAGE = "zh"
 PRICE_CURRENCY = "CNY"
 KM_AGE_UNIT = "km"
 
-BASE_URL = "https://www.guazi.com"
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+HEADERS = {
+    "User-Agent": UA,
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Referer": "https://www.guazi.com/",
+}
 
-OXY_USER = os.environ.get("OXY_USER", "")
-OXY_PASS = os.environ.get("OXY_PASS", "")
-OXY_URL = "https://realtime.oxylabs.io/v1/queries"
-OXY_TIMEOUT = 180
-OXY_MAX_RETRIES = 3
+BASE_URL = "https://www.guazi.com"
 
 # Photo HD: replace `w_330,h_220` (or any small) → 1920x1280
 PHOTO_HD_TARGET = "?x-bce-process=image/quality,q_95/resize,m_fill,w_1920,h_1280"
 
 from chinese_maps import (
     BRAND_MAP, COLOR_MAP, FUEL_MAP, TRANSMISSION_MAP, DRIVE_MAP, CITY_MAP,
-    SERIES_MAP, SERIES_SUFFIX_NOISE, SERIES_TO_BRAND,
 )
-
-
-_SERIES_SUFFIX_EN = {
-    "新能源": " EV", "进口": "", "插电混动": " PHEV",
-    "插电式混合动力": " PHEV", "混动": " Hybrid",
-    "PHEV": " PHEV", "EV": " EV",
-}
-
-
-def translate_series(s: str) -> str:
-    """Chinese model name → English via SERIES_MAP.
-
-    Order matters: try full string first (so combined keys like 宏光MINIEV
-    take precedence), then strip a known suffix and translate the stem.
-    """
-    if not s:
-        return ""
-    s = s.strip()
-    direct = SERIES_MAP.get(s)
-    if direct:
-        return direct
-    for tag in SERIES_SUFFIX_NOISE:
-        if s.endswith(tag) and len(s) > len(tag):
-            stem = s[: -len(tag)].strip()
-            stem_en = SERIES_MAP.get(stem, stem)
-            return (stem_en + _SERIES_SUFFIX_EN.get(tag, "")).strip()
-    return s
 
 
 def tr(value: str, mapping: dict[str, str]) -> str:
@@ -174,19 +145,7 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
     full_title = (title_m.group(1) if title_m
                   else meta.get("title") or "")
     # Title example: "二手哪吒汽车 哪吒N01 2020款 380t 行业定制版报价..."
-    # Some titles have promo prefixes: "二手【4S店直卖】二手红旗H5..." —
-    # strip every 【...】 block and ALL 二手 occurrences (not just leading).
-    short_title = full_title.split("报价")[0].strip()
-    short_title = re.sub(r"【[^】]*】", "", short_title)
-    short_title = short_title.replace("二手", "")
-    # Strip guazi SEO scaffolding: "...车价格-X.XX万公里...", "...车能卖多少钱",
-    # "...车成交价查询-", "- 瓜子车", "- 卖车上瓜子,..."
-    short_title = re.sub(r"\s*-\s*(瓜子车|卖车上瓜子.*)$", "", short_title)
-    short_title = re.sub(r"车价格-[\d.]+万公里", " ", short_title)
-    short_title = re.sub(r"车成交价查询-", " ", short_title)
-    short_title = re.sub(r"车能卖多少钱.*", "", short_title)
-    short_title = re.sub(r"车值多少钱.*", "", short_title)
-    short_title = re.sub(r"\s+", " ", short_title).strip()
+    short_title = re.sub(r"^二手", "", full_title).split("报价")[0].strip()
     parts = short_title.split(" ", 1) if " " in short_title else [short_title, ""]
     brand_zh = parts[0] if parts else ""
     series_complectation = parts[1] if len(parts) > 1 else ""
@@ -201,12 +160,9 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
                                     + " " + series_complectation).strip()
             break
     mark_en = tr(mark_zh, BRAND_MAP) or brand_zh
-    # The series often repeats the brand name (e.g. "哪吒汽车 哪吒N01") — strip it too.
-    # But NEVER strip a model-as-brand stem (Cayenne, Model 3, 揽胜 etc.) — that
-    # IS the model name we want to keep.
+    # The series often repeats the brand name (e.g. "哪吒汽车 哪吒N01") — strip it too
     for prefix in sorted_prefixes:
-        if (series_complectation.startswith(prefix)
-                and prefix not in SERIES_TO_BRAND):
+        if series_complectation.startswith(prefix):
             series_complectation = series_complectation[len(prefix):].strip()
             break
 
@@ -216,17 +172,6 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
         series_zh, complectation_zh = series_complectation.split(" ", 1)
     else:
         series_zh, complectation_zh = series_complectation, ""
-    # Skip "YYYY款" as series — fall through to the next token
-    if re.fullmatch(r"\d{4}款", series_zh) and " " in complectation_zh:
-        series_zh, complectation_zh = complectation_zh.split(" ", 1)
-    elif re.fullmatch(r"\d{4}款", series_zh):
-        series_zh = complectation_zh
-        complectation_zh = ""
-    # Model-as-brand fallback when no BRAND_MAP prefix matched
-    if not mark_zh and series_zh:
-        mark_en_fallback = SERIES_TO_BRAND.get(series_zh.strip())
-        if mark_en_fallback:
-            mark_en = mark_en_fallback
 
     # year = model year (from "2020款" in title), reg_date = first registration
     _, reg_iso = parse_yyyymm(pairs.get("首次上牌") or pairs.get("上牌时间"))
@@ -281,12 +226,8 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
     source_data = {k: v for k, v in source_data.items() if v is not None}
 
     detail_url = meta.get("url") or f"{BASE_URL}/car-detail/c{clue_id}.html"
-    # collector saves Chinese city name (北京) into metadata.city
-    city_zh = (meta.get("city") or "").strip()
-    city_en = tr(city_zh, CITY_MAP) if city_zh else None
-    # If lookup didn't translate (returned the same Chinese back), null it out
-    if city_en and city_en == city_zh:
-        city_en = None
+    city_en = meta.get("city")  # listing city (where displayed)
+    city_zh = next((zh for zh, en in CITY_MAP.items() if en == city_en), "")
 
     ts = DB.now_iso()
     return {
@@ -299,11 +240,9 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
         "mark_original": mark_zh or brand_zh or None,
         "mark": mark_en or None,
         "series_original": series_zh or None,
-        # Model is bare series (without brand), translated to English when possible.
-        # Frontend renders mark separately.
-        "model": translate_series(
-            series_zh.replace("系", " Series").replace("级", " Class").strip()
-        ) or None,
+        # Model is bare series (without brand) — frontend renders mark separately
+        "model": (series_zh.replace("系", " Series")
+                           .replace("级", " Class").strip()) or None,
         "complectation": complectation_zh or None,
         "year": year,
         "reg_date": reg_iso,
@@ -338,47 +277,53 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
     }
 
 
-def oxylabs_fetch(url: str) -> str | None:
-    """Render guazi detail page through Oxylabs (China geo)."""
-    payload = {
-        "source": "universal",
-        "url": url,
-        "geo_location": "China",
-        "locale": "zh-CN",
-        "render": "html",
-    }
-    for attempt in range(OXY_MAX_RETRIES):
+class WorkerCtx:
+    """Per-thread playwright session — guazi detail pages also have anti-bot."""
+    def __init__(self):
+        self.pw = None
+        self.browser = None
+        self.ctx = None
+        self.page = None
+
+    def __enter__(self):
+        self.pw = sync_playwright().start()
+        self.browser = self.pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+        )
+        self.ctx = self.browser.new_context(
+            user_agent=UA, locale="zh-CN", ignore_https_errors=True,
+            viewport={"width": 1366, "height": 900},
+        )
+        self.ctx.add_init_script(
+            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+        )
+        self.page = self.ctx.new_page()
+        return self.page
+
+    def __exit__(self, *_):
         try:
-            r = requests.post(
-                OXY_URL, auth=(OXY_USER, OXY_PASS),
-                json=payload, timeout=OXY_TIMEOUT,
-            )
-            if r.status_code != 200:
-                time.sleep(2 ** attempt)
-                continue
-            results = r.json().get("results") or []
-            if not results:
-                time.sleep(2 ** attempt)
-                continue
-            content = results[0].get("content") or ""
-            if len(content) < 5000:
-                time.sleep(2 ** attempt)
-                continue
-            # Captcha / verify pages — title="验证", or "captcha"/"slider" markers
-            head = content[:3000].lower()
-            if ("captcha" in head or "slider" in head
-                    or "<title>验证</title>" in content[:3000]
-                    or "请完成下方验证" in content[:3000]):
-                time.sleep(2 ** attempt)
-                continue
-            # Detail pages always have spec pairs JSON
-            if "表显里程" not in content and "首次上牌" not in content:
-                time.sleep(2 ** attempt)
-                continue
-            return content
-        except Exception:
-            time.sleep(2 ** attempt)
-    return None
+            self.browser.close()
+        finally:
+            self.pw.stop()
+
+
+def fetch_detail(url: str, page=None) -> str | None:
+    """Fetch via existing playwright page if given, else open fresh."""
+    if page is None:
+        with WorkerCtx() as p:
+            return fetch_detail(url, p)
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+        page.wait_for_timeout(800)
+        if "captcha" in page.url:
+            return None
+        html = page.content()
+        if len(html) < 5000:
+            return None
+        return html
+    except Exception:
+        return None
 
 
 def fetch_pending_rows(limit: int) -> list[dict]:
@@ -396,18 +341,38 @@ def fetch_pending_rows(limit: int) -> list[dict]:
     return [p for p in pending if str(p["source_id"]) not in scraped][:limit]
 
 
-def scrape_one(row: dict) -> tuple[str, bool, str]:
-    clue_id = row["source_id"]
-    meta = row.get("metadata") or {}
-    url = meta.get("url") or f"{BASE_URL}/car-detail/c{clue_id}.html"
-    html = oxylabs_fetch(url)
-    if not html:
-        return clue_id, False, "fetch failed"
-    rec = parse_card(html, meta, clue_id)
-    if not rec:
-        return clue_id, False, "parse failed"
-    ok = DB.upsert_car(rec)
-    return clue_id, ok, ""
+def scrape_batch(rows: list[dict]) -> list[tuple[str, bool, str]]:
+    """Per-batch playwright session. On captcha, restart browser context once."""
+    results: list[tuple[str, bool, str]] = []
+    captcha_streak = 0
+    ctx = WorkerCtx()
+    page = ctx.__enter__()
+    try:
+        for row in rows:
+            clue_id = row["source_id"]
+            meta = row.get("metadata") or {}
+            url = meta.get("url") or f"{BASE_URL}/car-detail/c{clue_id}.html"
+            html = fetch_detail(url, page)
+            if not html:
+                captcha_streak += 1
+                results.append((clue_id, False, "fetch failed"))
+                # 3 fails in a row → recycle browser
+                if captcha_streak >= 3:
+                    ctx.__exit__(None, None, None)
+                    ctx = WorkerCtx()
+                    page = ctx.__enter__()
+                    captcha_streak = 0
+                continue
+            captcha_streak = 0
+            rec = parse_card(html, meta, clue_id)
+            if not rec:
+                results.append((clue_id, False, "parse failed"))
+                continue
+            ok = DB.upsert_car(rec)
+            results.append((clue_id, ok, ""))
+    finally:
+        ctx.__exit__(None, None, None)
+    return results
 
 
 def main() -> None:
@@ -418,14 +383,18 @@ def main() -> None:
 
     if not DB.USE_POSTGRES:
         sys.exit("Need Postgres")
-    if not OXY_USER or not OXY_PASS:
-        sys.exit("Need OXY_USER and OXY_PASS")
 
     pending = fetch_pending_rows(args.limit)
     if not pending:
         print("No pending IDs"); return
-    print(f"Scraping {len(pending)} guazi cards via Oxylabs "
-          f"({args.workers} workers)")
+    print(f"Scraping {len(pending)} guazi cards with {args.workers} workers "
+          f"(batches of ~20 per playwright session)")
+
+    # Split pending into batches per worker (one playwright session per batch,
+    # reused for ~20 urls before recycling — keeps cookies fresh but avoids
+    # per-request browser startup cost).
+    BATCH_SIZE = 20
+    batches = [pending[i:i+BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)]
 
     ok_count = 0
     fail_count = 0
@@ -433,24 +402,24 @@ def main() -> None:
     processed = 0
 
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(scrape_one, r): r for r in pending}
+        futs = {ex.submit(scrape_batch, b): b for b in batches}
         for fut in as_completed(futs):
             try:
-                cid, ok, err = fut.result()
+                results = fut.result()
             except Exception:
                 traceback.print_exc()
-                fail_count += 1
+                fail_count += len(futs[fut])
                 continue
-            processed += 1
-            if ok:
-                ok_count += 1
-            else:
-                DB.mark_failed(SOURCE, cid)
-                fail_count += 1
-            if processed % 25 == 0 or processed == len(pending):
-                elapsed = int(time.time() - started)
-                print(f"  {processed}/{len(pending)} "
-                      f"(ok={ok_count}, fail={fail_count}, {elapsed}s)")
+            for cid, ok, err in results:
+                processed += 1
+                if ok:
+                    ok_count += 1
+                else:
+                    DB.mark_failed(SOURCE, cid)
+                    fail_count += 1
+            elapsed = int(time.time() - started)
+            print(f"  batch done: {processed}/{len(pending)} "
+                  f"(ok={ok_count}, fail={fail_count}, {elapsed}s)")
 
     elapsed = int(time.time() - started)
     print(f"\nDone in {elapsed}s. OK: {ok_count}, FAIL: {fail_count}")

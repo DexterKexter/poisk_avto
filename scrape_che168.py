@@ -71,6 +71,7 @@ def translate_series(s: str) -> str:
     return s
 
 
+
 def tr(value: str, mapping: dict[str, str]) -> str:
     if not value:
         return ""
