@@ -202,6 +202,11 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
     }
     inspection = {k: v for k, v in inspection.items() if v}
 
+    # Flat column: "2次理赔" → 2
+    claims_raw = inspection.get("insurance_claims") or ""
+    claims_digits = re.sub(r"\D", "", claims_raw)
+    insurance_claims_count = int(claims_digits) if claims_digits else None
+
     # Battery details (EVs)
     battery = {
         "capacity_kwh":     pairs.get("电池容量"),
@@ -267,6 +272,9 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
         "city": city_en or None,
 
         "vin": None,  # guazi hides
+
+        "owners_count": transfers,
+        "insurance_claims_count": insurance_claims_count,
 
         "images": photos,
         "image_count": len(photos),
