@@ -40,7 +40,36 @@ PHOTO_HD_TARGET = "1024x768"
 
 from chinese_maps import (
     BRAND_MAP, COLOR_MAP, FUEL_MAP, TRANSMISSION_MAP, DRIVE_MAP, CITY_MAP,
+    SERIES_MAP, SERIES_SUFFIX_NOISE, SERIES_TO_BRAND,
 )
+
+
+_SERIES_SUFFIX_EN = {
+    "新能源": " EV", "进口": "", "插电混动": " PHEV",
+    "插电式混合动力": " PHEV", "混动": " Hybrid",
+    "PHEV": " PHEV", "EV": " EV",
+}
+
+
+def translate_series(s: str) -> str:
+    """Chinese model name → English via SERIES_MAP.
+
+    Order matters: try full string first (so combined keys like 宏光MINIEV
+    take precedence), then strip a known suffix and translate the stem.
+    """
+    if not s:
+        return ""
+    s = s.strip()
+    direct = SERIES_MAP.get(s)
+    if direct:
+        return direct
+    for tag in SERIES_SUFFIX_NOISE:
+        if s.endswith(tag) and len(s) > len(tag):
+            stem = s[: -len(tag)].strip()
+            stem_en = SERIES_MAP.get(stem, stem)
+            return (stem_en + _SERIES_SUFFIX_EN.get(tag, "")).strip()
+    return s
+
 
 
 def tr(value: str, mapping: dict[str, str]) -> str:
@@ -203,6 +232,8 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
     photos = extract_photos(html)
     vin = extract_vin(html)
 
+    carname = meta.get("carname") or ""
+
     # year = model year (from "2024款" in carname), reg_date = registration date
     _, reg_iso = parse_year_month(
         specs.get("regdate_text") or meta.get("regdate"))
@@ -220,14 +251,29 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
     if not price_cny:
         price_cny = parse_price_cny(specs.get("title", ""))
 
-    carname = meta.get("carname") or ""
+    # che168 sometimes joins series with `/`-separated spec tail
+    # (e.g. "途锐/3.0T/21款/3.0TSI ..."). Drop everything from the first /.
+    if "/" in carname:
+        carname_for_parse = carname.split("/", 1)[0]
+    else:
+        carname_for_parse = carname
     # Brand: first space-separated token of carname (e.g. "宝马5系 2022款...")
     brand_zh = ""
     series_zh = ""
-    if carname:
+    if carname_for_parse:
         # carname is like "宝马5系 2022款 530Li 尊享型 M运动套装"
-        parts = carname.split(" ", 1)
-        series_zh = parts[0]
+        tokens = carname_for_parse.split(" ")
+        series_zh = tokens[0] if tokens else ""
+        # Two-word brand/model stems take precedence ("Model 3", "Model Y",
+        # "Land Rover", "Alfa Romeo", "Rolls-Royce 库里南", etc.)
+        if len(tokens) >= 2:
+            two = f"{tokens[0]} {tokens[1]}"
+            if two in BRAND_MAP or two in SERIES_TO_BRAND:
+                series_zh = two
+                tokens = [two] + tokens[2:]
+        # Skip "YYYY款" as series — fall through to next token
+        if re.fullmatch(r"\d{4}款", series_zh) and len(tokens) > 1:
+            series_zh = tokens[1]
         # Try to find the Chinese brand prefix (longest match first)
         sorted_prefixes = sorted(BRAND_MAP, key=len, reverse=True)
         for prefix in sorted_prefixes:
@@ -236,19 +282,30 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
                 series_zh = series_zh[len(prefix):]
                 break
         # series may still start with a (shorter) brand prefix
+        # (but never strip a model-as-brand stem like Cayenne / Model 3)
         for prefix in sorted_prefixes:
-            if series_zh.startswith(prefix):
+            if (series_zh.startswith(prefix)
+                    and prefix not in SERIES_TO_BRAND):
                 series_zh = series_zh[len(prefix):]
                 break
 
     mark_en = tr(brand_zh, BRAND_MAP) or brand_zh or ""
-    # series cleaned: replace 系/级
+    # Model-as-brand fallback (威霆, 添越, AMG, SUPRA, Huracán, etc.)
+    if not mark_en and series_zh:
+        mark_en = SERIES_TO_BRAND.get(series_zh.strip(), "")
+    # series cleaned: replace 系/级, then translate via SERIES_MAP if possible
     series_en = series_zh.replace("系", " Series").replace("级", " Class").strip()
+    series_en = translate_series(series_en) or series_en
 
-    # Drive / transmission / fuel — translate
+    # Drive / transmission / fuel — translate. Regex on che168 detail page
+    # can pull description fragments ("运转良好" etc) when 变速箱 appears in
+    # text outside the spec block. Validate against the canonical map.
     drive_zh = specs.get("drive_type_zh", "")
+    drive_zh = drive_zh if drive_zh in DRIVE_MAP else ""
     trans_zh = specs.get("transmission_zh", "")
+    trans_zh = trans_zh if trans_zh in TRANSMISSION_MAP else ""
     fuel_zh = specs.get("fuel_zh", "")
+    fuel_zh = fuel_zh if fuel_zh in FUEL_MAP else ""
 
     transfers = parse_int(specs.get("transfers_text"))
 
@@ -267,6 +324,15 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
             battery_health_pct = float(bh_digits)
         except ValueError:
             battery_health_pct = None
+
+    # Displacement — regex captures "2.0T" / "1.5L"; store numeric liters in
+    # the main column so it matches autocango/encar (raw string stays in
+    # source_data for traceability).
+    disp_raw = specs.get("displacement", "")
+    disp_match = re.search(r"([\d.]+)", disp_raw)
+    displacement_l = float(disp_match.group(1)) if disp_match else None
+    if displacement_l == 0:
+        displacement_l = None
 
     detail_url = (meta.get("url")
                   or f"{BASE_URL}/dealer/{meta.get('dealerid')}/{sku_id}.html")
@@ -326,6 +392,7 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
         "transmission_type": tr(trans_zh, TRANSMISSION_MAP) or None,
         "drive_type": tr(drive_zh, DRIVE_MAP) or None,
         "drive_original": drive_zh or None,
+        "displacement": displacement_l,
 
         "city_original": city_zh or None,
         "city": city_name or None,

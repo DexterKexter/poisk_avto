@@ -24,6 +24,7 @@ import re
 import sys
 import time
 import traceback
+import urllib.parse
 from typing import Any
 
 import db as DB
@@ -72,9 +73,42 @@ def get_relevant_brands(filter_csv: str | None) -> list[dict]:
     return matched
 
 
+def _deref(data: list, v):
+    """Resolve Nuxt-3 pointer-payload index to its target."""
+    if isinstance(v, int) and 0 <= v < len(data):
+        return data[v]
+    return v
+
+
+def _find_brand_code(data: list, brand_slug: str) -> str | None:
+    """In the page payload, find {id, label, value} dicts and match label→slug.
+
+    The brand selector ('specPopular') exposes [{id, label, value}, ...] where
+    label is the human-readable name ('BMW') and value is the internal 3-5 char
+    code ('M4L'). We use that code to filter the model list.
+    """
+    target = brand_slug.lower()
+    for v in data:
+        if not isinstance(v, dict):
+            continue
+        if not {"id", "label", "value"} <= set(v.keys()):
+            continue
+        label = _deref(data, v.get("label"))
+        if isinstance(label, str) and label.lower() == target:
+            value = _deref(data, v.get("value"))
+            if isinstance(value, str):
+                return value
+    return None
+
+
 def fetch_model_links(page, brand_slug: str) -> list[dict]:
-    """Open /carspecs/brandName=X, extract model spec URLs."""
-    url = f"{BASE_URL}/carspecs/brandName={brand_slug}"
+    """Open /carspecs/brandName=X, decode Nuxt 3 payload, return model entries.
+
+    Cards are JS-rendered without plain hrefs, but the SSR payload at
+    <script id="__NUXT_DATA__"> contains lists of {id, name, parentId} dicts
+    — one list per popular brand. We pick the one matching our brand_slug.
+    """
+    url = f"{BASE_URL}/carspecs/brandName={urllib.parse.quote(brand_slug)}"
     try:
         page.goto(url, wait_until="load", timeout=60_000)
         page.wait_for_timeout(2500)
@@ -82,34 +116,65 @@ def fetch_model_links(page, brand_slug: str) -> list[dict]:
         print(f"    goto failed: {str(e)[:120]}")
         return []
     try:
-        models = page.evaluate(
-            r"""() => {
-                const out = [];
-                const seen = new Set();
-                for (const a of document.querySelectorAll('a[href*="/cs/carspecs-"]')) {
-                    const href = a.getAttribute('href');
-                    if (!href || seen.has(href)) continue;
-                    seen.add(href);
-                    // /cs/carspecs-{Brand}-{Model-Name}-{5char_code}
-                    const m = href.match(/\/cs\/carspecs-(.+?)-([A-Z0-9]{4,8})$/);
-                    if (!m) continue;
-                    // split by '-' to extract brand vs model (brand is first token, rest is model)
-                    const parts = m[1].split('-');
-                    const text = a.innerText.trim().slice(0, 100);
-                    out.push({
-                        href,
-                        url: new URL(href, location.origin).href,
-                        code: m[2],
-                        slug_path: m[1],
-                        text,
-                    });
-                }
-                return out;
-            }""")
+        nuxt = page.evaluate(
+            """() => {
+                const el = document.getElementById('__NUXT_DATA__');
+                return el ? el.textContent : null;
+            }"""
+        )
     except Exception as e:
-        print(f"    evaluate failed: {str(e)[:120]}")
+        print(f"    eval failed: {str(e)[:120]}")
         return []
-    return models or []
+    if not nuxt:
+        print(f"    no __NUXT_DATA__ on page")
+        return []
+    try:
+        data = json.loads(nuxt)
+    except Exception as e:
+        print(f"    json parse failed: {str(e)[:120]}")
+        return []
+
+    brand_code = _find_brand_code(data, brand_slug)
+    if not brand_code:
+        print(f"    brand code not found in payload for slug={brand_slug}")
+        return []
+
+    # Find list-of-dicts where every dict has {id, name, parentId} and
+    # parentId resolves to our brand's code.
+    models: list[dict] = []
+    seen_codes: set[str] = set()
+    for v in data:
+        if not isinstance(v, list) or len(v) < 1:
+            continue
+        first = _deref(data, v[0])
+        if not isinstance(first, dict):
+            continue
+        if not {"id", "name", "parentId"} <= set(first.keys()):
+            continue
+        parent_val = _deref(data, first.get("parentId"))
+        if parent_val != brand_code:
+            continue
+        for item_idx in v:
+            item = _deref(data, item_idx)
+            if not isinstance(item, dict):
+                continue
+            code = _deref(data, item.get("id"))
+            name = _deref(data, item.get("name"))
+            if not isinstance(code, str) or not isinstance(name, str):
+                continue
+            if code in seen_codes:
+                continue
+            seen_codes.add(code)
+            slug_path = f"{brand_slug.replace(' ', '-')}-{name.replace(' ', '-')}"
+            href = f"/cs/carspecs-{slug_path}-{code}"
+            models.append({
+                "href": href,
+                "url": f"{BASE_URL}{href}",
+                "code": code,
+                "slug_path": slug_path,
+                "text": name,
+            })
+    return models
 
 
 # Regex patterns for variant fields (one variant block = one regex pass)

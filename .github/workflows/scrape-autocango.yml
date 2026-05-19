@@ -2,8 +2,9 @@ name: Scrape AutoCango
 
 on:
   schedule:
-    # Daily 21:00 UTC = 05:00 Beijing (next day).
-    - cron: '0 21 * * *'
+    # Every 12 hours at :45 (offset from all other scrapers).
+    # autocango is an aggregator with a slow refresh rate; twice a day is plenty.
+    - cron: '45 */12 * * *'
   workflow_dispatch:
     inputs:
       cities:
@@ -34,6 +35,10 @@ on:
         description: 'Max detail pages to scrape this run'
         required: false
         default: '500'
+
+concurrency:
+  group: scrape-autocango
+  cancel-in-progress: false
 
 jobs:
   scrape:

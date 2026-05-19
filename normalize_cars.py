@@ -21,7 +21,34 @@ from typing import Any
 import db as DB
 from chinese_maps import (
     BRAND_MAP, COLOR_MAP, FUEL_MAP, TRANSMISSION_MAP, DRIVE_MAP, CITY_MAP,
+    SERIES_MAP, SERIES_SUFFIX_NOISE, SERIES_TO_BRAND,
 )
+
+
+_SERIES_SUFFIX_EN = {
+    "新能源": " EV", "进口": "", "插电混动": " PHEV",
+    "插电式混合动力": " PHEV", "混动": " Hybrid",
+    "PHEV": " PHEV", "EV": " EV",
+}
+
+
+def translate_series(series_zh: str) -> str:
+    """series_zh → English via SERIES_MAP. Tries full string first, then
+    strips a known suffix (新能源/进口/插电混动/…) and re-appends English
+    equivalent.
+    """
+    if not series_zh:
+        return ""
+    s = series_zh.strip()
+    direct = SERIES_MAP.get(s)
+    if direct:
+        return direct
+    for tag in SERIES_SUFFIX_NOISE:
+        if s.endswith(tag) and len(s) > len(tag):
+            stem = s[: -len(tag)].strip()
+            stem_en = SERIES_MAP.get(stem, stem)
+            return (stem_en + _SERIES_SUFFIX_EN.get(tag, "")).strip()
+    return series_zh
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -71,15 +98,27 @@ def normalize_row(row: dict) -> dict:
     # 1. Mark (brand) — from mark_original OR series_original via BRAND_MAP.
     # che168 listings sometimes drop the brand prefix entirely, so first word
     # of series_original may itself be a model-as-brand stem (e.g. "Cayenne",
-    # "Elantra", "Model 3", "傲虎").
+    # "Elantra", "Model 3", "傲虎", "威霆", "添越", "AMG"). After BRAND_MAP,
+    # fall back to SERIES_TO_BRAND for these orphaned series.
     mark_orig = row.get("mark_original") or ""
     series_orig_raw = row.get("series_original") or ""
     candidate = mark_orig or series_orig_raw
+    new_mark = None
     if candidate:
         prefix, _ = strip_brand_prefix(candidate)
         new_mark = BRAND_MAP.get(prefix) or BRAND_MAP.get(candidate)
-        if new_mark and new_mark != row.get("mark"):
-            delta["mark"] = new_mark
+    if not new_mark and series_orig_raw:
+        s = series_orig_raw.strip()
+        new_mark = SERIES_TO_BRAND.get(s)
+        if not new_mark:
+            # Try stripping a known noise suffix (进口/新能源/插电混动/…)
+            for tag in SERIES_SUFFIX_NOISE:
+                if s.endswith(tag) and len(s) > len(tag):
+                    new_mark = SERIES_TO_BRAND.get(s[: -len(tag)].strip())
+                    if new_mark:
+                        break
+    if new_mark and new_mark != row.get("mark"):
+        delta["mark"] = new_mark
 
     # 2. Color
     co = row.get("color_original")
@@ -141,6 +180,20 @@ def normalize_row(row: dict) -> dict:
         cleaned = normalize_series(series_orig_raw, mark_orig)
         if cleaned and not HAS_CN.search(cleaned):
             delta["model"] = cleaned
+            cur_model = cleaned
+
+    # SERIES_MAP pass — translate Chinese model names to official English
+    if cur_model and HAS_CN.search(cur_model):
+        en = translate_series(cur_model)
+        if en and en != cur_model and not HAS_CN.search(en):
+            delta["model"] = en
+            cur_model = en
+        else:
+            # Maybe the full series_original maps (when extraction picked
+            # a noisy variant). Try that as fallback.
+            en2 = translate_series(series_orig_raw)
+            if en2 and not HAS_CN.search(en2):
+                delta["model"] = en2
 
     return delta
 

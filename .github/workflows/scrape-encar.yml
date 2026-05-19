@@ -2,8 +2,8 @@ name: Scrape Encar
 
 on:
   schedule:
-    # Daily 20:00 UTC = 05:00 Seoul (next day). Discovers + scrapes new cars.
-    - cron: '0 20 * * *'
+    # Hourly. encar API typically returns in 9-15 min so hourly is safe.
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       pages:
@@ -30,6 +30,13 @@ on:
         description: 'Parallel batch workers (each batch = 5 cars via API)'
         required: false
         default: '5'
+
+# Never let two encar runs collide — if a new schedule fires while the
+# previous run is still finishing (or stuck), the new one queues instead
+# of starting in parallel.
+concurrency:
+  group: scrape-encar
+  cancel-in-progress: false
 
 jobs:
   scrape:

@@ -2,8 +2,9 @@ name: Scrape guazi
 
 on:
   schedule:
-    # Daily 20:30 UTC = 04:30 Beijing
-    - cron: '30 20 * * *'
+    # Every 2 hours at :30 (offset from encar :00 and che168 :15).
+    # Typical run 15-35 min, fits comfortably in a 2h slot.
+    - cron: '30 */2 * * *'
   workflow_dispatch:
     inputs:
       cities:
@@ -31,6 +32,10 @@ on:
         required: false
         default: '8'
 
+concurrency:
+  group: scrape-guazi
+  cancel-in-progress: false
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
@@ -40,8 +45,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install deps
-        run: pip install -r requirements.txt
+      - name: Install deps + playwright
+        # collect_guazi.py uses playwright to bypass guazi's bot detection
+        # on the listing pages; scrape_guazi.py uses direct HTTP.
+        run: |
+          pip install -r requirements.txt
+          pip install playwright
+          python -m playwright install chromium --with-deps
 
       - name: Collect listings (6 cities + filters)
         env:
