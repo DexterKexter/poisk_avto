@@ -132,7 +132,7 @@ def mirror_car(car: dict) -> tuple[int, int]:
         # write back only the rewritten array
         r = DB._pg_request(
             "PATCH", f"cars?source=eq.{source}&source_id=eq.{source_id}",
-            json={"images": new_images, "updated_at": DB.now_iso()},
+            json={"images": new_images},
         )
         if r.status_code not in (200, 204):
             print(f"  ! DB update failed for {source}/{source_id}: "
@@ -147,7 +147,8 @@ def fetch_cars_to_mirror(limit: int | None, source_filter: str | None
     are che168/autohome only, so we restrict by source first to keep the
     payload small."""
     select = "source,source_id,images"
-    params = ["select=" + select, "order=updated_at.desc"]
+    # No order: we paginate by offset and don't need recency ordering.
+    params = ["select=" + select]
     # autoimg.cn URLs come from che168 (and historically autohome). Cap
     # the query to those sources unless caller asked for something else.
     if source_filter:
