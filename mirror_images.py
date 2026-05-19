@@ -142,17 +142,39 @@ def mirror_car(car: dict) -> tuple[int, int]:
 
 def fetch_cars_to_mirror(limit: int | None, source_filter: str | None
                          ) -> list[dict]:
+    """Pull candidate cars then filter client-side. `images` is jsonb so
+    PostgREST `ilike` is not supported; sources that ship autoimg URLs
+    are che168/autohome only, so we restrict by source first to keep the
+    payload small."""
     select = "source,source_id,images"
-    params = ["select=" + select, "images=ilike.*autoimg.cn*"]
+    params = ["select=" + select, "order=updated_at.desc"]
+    # autoimg.cn URLs come from che168 (and historically autohome). Cap
+    # the query to those sources unless caller asked for something else.
     if source_filter:
         params.append(f"source=eq.{source_filter}")
+    else:
+        params.append("source=in.(che168,autohome)")
+    # Pull in pages of 1000 (PostgREST default ceiling).
+    page_size = 1000
+    offset = 0
+    rows: list[dict] = []
+    while True:
+        page_params = params + [f"limit={page_size}", f"offset={offset}"]
+        r = DB._pg_request("GET", "cars?" + "&".join(page_params))
+        if r.status_code != 200:
+            sys.exit(f"DB read fail: {r.status_code} {r.text[:200]}")
+        batch = r.json()
+        if not batch:
+            break
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += page_size
+    # Client-side filter for autoimg.cn presence
+    out = [c for c in rows if needs_mirror(c.get("images") or [])]
     if limit:
-        params.append(f"limit={limit}")
-    q = "&".join(params)
-    r = DB._pg_request("GET", f"cars?{q}")
-    if r.status_code != 200:
-        sys.exit(f"DB read fail: {r.status_code} {r.text[:200]}")
-    return r.json()
+        out = out[:limit]
+    return out
 
 
 def main() -> None:
