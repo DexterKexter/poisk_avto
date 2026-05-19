@@ -262,7 +262,9 @@ CREATE TABLE IF NOT EXISTS cars (
     reg_city_original TEXT, reg_city TEXT,
     reg_date TEXT,
 
-    owners_count INTEGER, maintenance TEXT, interior_color_original TEXT,
+    owners_count INTEGER, has_accident_record INTEGER,
+    insurance_claims_count INTEGER, battery_health_pct REAL,
+    maintenance TEXT, interior_color_original TEXT,
     description TEXT,
     images TEXT, image_count INTEGER,
 
@@ -326,6 +328,9 @@ def sqlite_conn() -> sqlite3.Connection:
             "ALTER TABLE cars ADD COLUMN vin TEXT",
             "ALTER TABLE cars ADD COLUMN published_at TEXT",
             "ALTER TABLE cars ADD COLUMN listing_updated_at TEXT",
+            "ALTER TABLE cars ADD COLUMN has_accident_record INTEGER",
+            "ALTER TABLE cars ADD COLUMN insurance_claims_count INTEGER",
+            "ALTER TABLE cars ADD COLUMN battery_health_pct REAL",
         ):
             try:
                 _sqlite_conn.execute(stmt)

@@ -144,6 +144,10 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
     title_m = re.search(r"<title>([^<]+)</title>", html)
     full_title = (title_m.group(1) if title_m
                   else meta.get("title") or "")
+    # Guazi serves a generic "China Used Cars Export & Auction | Second Hand Cars - Guazi"
+    # title when the page is rate-limited or blocked. Skip parsing entirely.
+    if not full_title.startswith("二手") and "Second Hand Cars" in full_title:
+        return None
     # Title example: "二手哪吒汽车 哪吒N01 2020款 380t 行业定制版报价..."
     short_title = re.sub(r"^二手", "", full_title).split("报价")[0].strip()
     parts = short_title.split(" ", 1) if " " in short_title else [short_title, ""]
@@ -206,6 +210,11 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
         "guarantee":       pairs.get("车况保障"),
     }
     inspection = {k: v for k, v in inspection.items() if v}
+
+    # Flat column: "2次理赔" → 2
+    claims_raw = inspection.get("insurance_claims") or ""
+    claims_digits = re.sub(r"\D", "", claims_raw)
+    insurance_claims_count = int(claims_digits) if claims_digits else None
 
     # Battery details (EVs)
     battery = {
@@ -273,6 +282,9 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
         "city": city_en or None,
 
         "vin": None,  # guazi hides
+
+        "owners_count": transfers,
+        "insurance_claims_count": insurance_claims_count,
 
         "images": photos,
         "image_count": len(photos),
