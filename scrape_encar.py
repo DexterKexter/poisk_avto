@@ -271,7 +271,6 @@ def parse_car(api_car: dict) -> dict | None:
             "reg_date": _format_reg_date(year_month),
 
             "owners_count": None,
-            "has_accident_record": (condition.get("accident") or {}).get("recordView"),
             "maintenance": "",
             "interior_color_original": "",
             "description": contents.get("text", "") or "",

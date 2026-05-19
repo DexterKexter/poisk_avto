@@ -310,12 +310,6 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
     transfers = parse_int(specs.get("transfers_text"))
 
     # Flat columns: derived from raw badges/specs
-    has_accident_record: bool | None = None
-    if isinstance(badges, dict) and badges:
-        try:
-            has_accident_record = int(badges.get("事故车", 0) or 0) > 0
-        except (TypeError, ValueError):
-            has_accident_record = None
     battery_health_pct: float | None = None
     bh_raw = specs.get("battery_health") or ""
     bh_digits = re.sub(r"[^0-9.]", "", bh_raw)
@@ -400,7 +394,6 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
         "vin": vin,
 
         "owners_count": transfers,
-        "has_accident_record": has_accident_record,
         "battery_health_pct": battery_health_pct,
 
         "images": photos,
