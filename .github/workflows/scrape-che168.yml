@@ -2,8 +2,9 @@ name: Scrape che168
 
 on:
   schedule:
-    # Daily 19:30 UTC = 03:30 Beijing
-    - cron: '30 19 * * *'
+    # Every 4 hours at :15 (offset from encar :00 to spread CI load).
+    # Detail-scrape can hit 60-90 min, so 4h cadence leaves a safe gap.
+    - cron: '15 */4 * * *'
   workflow_dispatch:
     inputs:
       cities:
@@ -31,6 +32,10 @@ on:
       workers:
         required: false
         default: '4'
+
+concurrency:
+  group: scrape-che168
+  cancel-in-progress: false
 
 jobs:
   scrape:
