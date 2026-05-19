@@ -309,6 +309,15 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
 
     transfers = parse_int(specs.get("transfers_text"))
 
+    # Displacement — regex captures "2.0T" / "1.5L"; store numeric liters in
+    # the main column so it matches autocango/encar (raw string stays in
+    # source_data for traceability).
+    disp_raw = specs.get("displacement", "")
+    disp_match = re.search(r"([\d.]+)", disp_raw)
+    displacement_l = float(disp_match.group(1)) if disp_match else None
+    if displacement_l == 0:
+        displacement_l = None
+
     detail_url = (meta.get("url")
                   or f"{BASE_URL}/dealer/{meta.get('dealerid')}/{sku_id}.html")
     publicdate = meta.get("publicdate")
@@ -367,6 +376,7 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
         "transmission_type": tr(trans_zh, TRANSMISSION_MAP) or None,
         "drive_type": tr(drive_zh, DRIVE_MAP) or None,
         "drive_original": drive_zh or None,
+        "displacement": displacement_l,
 
         "city_original": city_zh or None,
         "city": city_name or None,

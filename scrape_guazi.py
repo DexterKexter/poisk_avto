@@ -187,6 +187,11 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
     drive_zh = pairs.get("驱动方式", "")
     fuel_zh = pairs.get("能源类型") or pairs.get("燃料类型", "")
     displacement = pairs.get("发动机", "")
+    # Numeric liters for the main column (e.g. "2.0L" → 2.0). EVs report "0.0L".
+    disp_match = re.search(r"([\d.]+)", displacement or "")
+    displacement_l = float(disp_match.group(1)) if disp_match else None
+    if displacement_l == 0:
+        displacement_l = None
     emission = pairs.get("排放标准", "")
 
     # Inspection scorecard fields
@@ -262,6 +267,7 @@ def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
         "transmission_type": tr(transmission_zh, TRANSMISSION_MAP) or None,
         "drive_type": tr(drive_zh, DRIVE_MAP) or None,
         "drive_original": drive_zh or None,
+        "displacement": displacement_l,
 
         "city_original": city_zh or None,
         "city": city_en or None,
