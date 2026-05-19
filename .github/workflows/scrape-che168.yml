@@ -67,3 +67,14 @@ jobs:
           python scrape_che168.py \
             --limit   ${{ inputs.scrape_limit || 3000 }} \
             --workers ${{ inputs.workers      || 4 }}
+
+      # autoimg.cn ships images without Cross-Origin-Resource-Policy,
+      # which Chrome ORB blocks in <img>/<Image>. Re-host every fresh
+      # listing's photos in Supabase Storage so they render in browsers.
+      # Idempotent: a car whose images are already on our CDN is skipped.
+      - name: Mirror blocked images to Supabase Storage
+        if: always()  # run even if scrape step failed for some rows
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python mirror_images.py --source che168 --workers 6
