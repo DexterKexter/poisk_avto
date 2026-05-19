@@ -38,7 +38,7 @@ import db as DB
 sys.stdout.reconfigure(line_buffering=True)
 
 BUCKET = "car-images"
-BLOCKED_HOST_SUBSTRING = "autoimg.cn"  # the host pattern we mirror
+BLOCKED_HOST_SUBSTRING = "autoimg.cn"  # the host pattern we mirror (Chrome ORB)
 PUBLIC_URL = f"{DB.SUPABASE_URL}/storage/v1/object/public/{BUCKET}"
 DOWNLOAD_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
