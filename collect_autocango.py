@@ -216,6 +216,33 @@ def main() -> None:
                 except Exception as e:
                     print(f"  [{city} p{n}] EXCEPTION: {e}")
                     continue
+                # Diagnostic: dump page state on the FIRST page when no
+                # listings come back — that's the smoking gun for HTML
+                # changes or anti-bot blocks.
+                if n == 1 and not cars:
+                    try:
+                        html = page.content()
+                    except Exception:
+                        html = ""
+                    title_text = ""
+                    try:
+                        title_text = page.title()[:120]
+                    except Exception:
+                        pass
+                    head = (html or "")[:1500]
+                    sample_hrefs = sorted(set(
+                        re.findall(r'href="(/[a-zA-Z0-9_./-]+/)"', html or "")
+                    ))[:20]
+                    print(
+                        f"  ⚠ DIAGNOSE [autocango/{city}] {url}\n"
+                        f"    final URL: {page.url}\n"
+                        f"    <title>: {title_text!r}\n"
+                        f"    HTML length: {len(html or '')}\n"
+                        f"    sample hrefs ({len(sample_hrefs)}): {sample_hrefs}\n"
+                        f"    HTML preview:\n{head}\n"
+                        f"    ---end preview---",
+                        flush=True,
+                    )
                 new_on_page = 0
                 for car in cars:
                     cid = car.get("id")
