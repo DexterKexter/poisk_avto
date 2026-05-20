@@ -344,84 +344,94 @@ def main() -> None:
 
     print(f"Backend: {DB.backend_name()}")
     print(f"Source: {SOURCE}")
-    existing = DB.count_cars(SOURCE)
-    print(f"cars[{SOURCE}] already: {existing}")
 
-    ids = DB.get_pending_ids(SOURCE, args.limit)
-    print(f"Loaded {len(ids)} pending IDs\n")
-    if not ids:
-        print("Nothing to scrape. Run collect_autocango.py first.")
-        return
-
-    # Fetch metadata for each ID so we can reconstruct URLs
-    metas: dict[str, dict] = {}
-    if DB.USE_POSTGRES:
-        for chunk_start in range(0, len(ids), 100):
-            chunk = ids[chunk_start:chunk_start + 100]
-            ids_in = ",".join(f'"{i}"' for i in chunk)
-            r = DB._pg_request(
-                "GET",
-                f"pending_ids?source=eq.{SOURCE}"
-                f"&source_id=in.({ids_in})"
-                f"&select=source_id,metadata"
-            )
-            if r.status_code == 200:
-                for row in r.json():
-                    metas[row["source_id"]] = row.get("metadata") or {}
-
-    started = time.time()
+    # Open a sync_log row so the admin dashboard can show this run.
+    run_id = DB.sync_log_start(SOURCE, os.environ.get("GITHUB_RUN_URL"))
     ok = fail = 0
+    error_message: str | None = None
+    try:
+        existing = DB.count_cars(SOURCE)
+        print(f"cars[{SOURCE}] already: {existing}")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled",
-                  "--no-sandbox", "--disable-dev-shm-usage"],
-        )
-        ctx = browser.new_context(user_agent=UA,
-                                  viewport={"width": 1366, "height": 768},
-                                  locale="en-US")
-        ctx.add_init_script(
-            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-        )
-        # Warm the WAF cookies by visiting listing page once
-        warmup = ctx.new_page()
-        try:
-            warmup.goto("https://www.autocango.com/usedcar/excludeSold=true",
-                        wait_until="networkidle", timeout=60_000)
-        except Exception:
-            pass
-        warmup.close()
-        page = ctx.new_page()
+        ids = DB.get_pending_ids(SOURCE, args.limit)
+        print(f"Loaded {len(ids)} pending IDs\n")
+        if not ids:
+            print("Nothing to scrape. Run collect_autocango.py first.")
+            return
 
-        for i, cid in enumerate(ids, 1):
-            meta = metas.get(cid, {})
-            url = build_detail_url(meta, cid)
+        # Fetch metadata for each ID so we can reconstruct URLs
+        metas: dict[str, dict] = {}
+        if DB.USE_POSTGRES:
+            for chunk_start in range(0, len(ids), 100):
+                chunk = ids[chunk_start:chunk_start + 100]
+                ids_in = ",".join(f'"{i}"' for i in chunk)
+                r = DB._pg_request(
+                    "GET",
+                    f"pending_ids?source=eq.{SOURCE}"
+                    f"&source_id=in.({ids_in})"
+                    f"&select=source_id,metadata"
+                )
+                if r.status_code == 200:
+                    for row in r.json():
+                        metas[row["source_id"]] = row.get("metadata") or {}
+
+        started = time.time()
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled",
+                      "--no-sandbox", "--disable-dev-shm-usage"],
+            )
+            ctx = browser.new_context(user_agent=UA,
+                                      viewport={"width": 1366, "height": 768},
+                                      locale="en-US")
+            ctx.add_init_script(
+                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+            )
+            # Warm the WAF cookies by visiting listing page once
+            warmup = ctx.new_page()
             try:
-                page.goto(url, wait_until="networkidle", timeout=60_000)
-                page.wait_for_timeout(1000)
-                detail = page.evaluate(extract_detail_js())
-            except Exception as e:
-                fail += 1
-                DB.mark_failed(SOURCE, cid)
-                print(f"  [{i}/{len(ids)}] {cid} FAIL: {e}")
-                continue
+                warmup.goto("https://www.autocango.com/usedcar/excludeSold=true",
+                            wait_until="networkidle", timeout=60_000)
+            except Exception:
+                pass
+            warmup.close()
+            page = ctx.new_page()
 
-            rec = parse_detail_to_car(cid, detail, meta)
-            if DB.upsert_car(rec):
-                ok += 1
-                print(f"  [{i}/{len(ids)}] {cid} OK {rec['mark']} {rec['model']} "
-                      f"{rec['year']} ${rec['price_original']} {rec['km_age']}km")
-            else:
-                fail += 1
-                DB.mark_failed(SOURCE, cid)
-                print(f"  [{i}/{len(ids)}] {cid} DB FAIL")
+            for i, cid in enumerate(ids, 1):
+                meta = metas.get(cid, {})
+                url = build_detail_url(meta, cid)
+                try:
+                    page.goto(url, wait_until="networkidle", timeout=60_000)
+                    page.wait_for_timeout(1000)
+                    detail = page.evaluate(extract_detail_js())
+                except Exception as e:
+                    fail += 1
+                    DB.mark_failed(SOURCE, cid)
+                    print(f"  [{i}/{len(ids)}] {cid} FAIL: {e}")
+                    continue
 
-        browser.close()
+                rec = parse_detail_to_car(cid, detail, meta)
+                if DB.upsert_car(rec):
+                    ok += 1
+                    print(f"  [{i}/{len(ids)}] {cid} OK {rec['mark']} {rec['model']} "
+                          f"{rec['year']} ${rec['price_original']} {rec['km_age']}km")
+                else:
+                    fail += 1
+                    DB.mark_failed(SOURCE, cid)
+                    print(f"  [{i}/{len(ids)}] {cid} DB FAIL")
 
-    elapsed = int(time.time() - started)
-    print(f"\nDone in {elapsed}s. OK: {ok}, FAIL: {fail}")
-    print(f"Total cars[{SOURCE}]: {DB.count_cars(SOURCE)}")
+            browser.close()
+
+        elapsed = int(time.time() - started)
+        print(f"\nDone in {elapsed}s. OK: {ok}, FAIL: {fail}")
+        print(f"Total cars[{SOURCE}]: {DB.count_cars(SOURCE)}")
+    except Exception as e:
+        error_message = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        raise
+    finally:
+        DB.sync_log_finish(run_id, added=ok, failed=fail, error_message=error_message)
 
 
 if __name__ == "__main__":
