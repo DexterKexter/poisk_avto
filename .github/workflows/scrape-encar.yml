@@ -42,6 +42,11 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    # GITHUB_RUN_URL is consumed by scrape_encar.py → DB.sync_log_start so
+    # each row in the admin "Последние запуски" panel deep-links back to
+    # the exact GH Actions run for log inspection.
+    env:
+      GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
 
