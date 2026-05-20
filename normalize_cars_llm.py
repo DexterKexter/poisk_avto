@@ -158,11 +158,11 @@ def call_llm(rows: list[dict], api_key: str, model: str
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": build_user_message(rows)},
         ],
-        # Force JSON output where the provider supports it. OpenRouter
-        # passes this through for Kimi/DeepSeek/most modern models.
-        "response_format": {"type": "json_object"},
+        # Don't force response_format=json_object here — Kimi sometimes
+        # returns empty content when it can't fit the wrapper. The system
+        # prompt already mandates a raw JSON array, which is what we parse.
         "temperature": 0.0,
-        "max_tokens": 4096,
+        "max_tokens": 8192,
     }
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -174,17 +174,30 @@ def call_llm(rows: list[dict], api_key: str, model: str
     if r.status_code != 200:
         raise RuntimeError(f"OpenRouter {r.status_code}: {r.text[:400]}")
     payload = r.json()
-    text = payload["choices"][0]["message"]["content"].strip()
+    try:
+        text = payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise RuntimeError(f"unexpected payload shape: "
+                           f"{json.dumps(payload)[:800]}")
+    if text is None:
+        # Some providers return content=null and put text in `reasoning`
+        # or `tool_calls`. Log the full payload so we can diagnose.
+        raise RuntimeError(f"content=None, payload: "
+                           f"{json.dumps(payload)[:800]}")
+    text = text.strip()
     # Strip ```json fences if present
     if text.startswith("```"):
         text = text.split("\n", 1)[1] if "\n" in text else text
-        text = text.rstrip("`").rstrip().rstrip("`")
         if text.endswith("```"):
             text = text[: -3].strip()
-    # Kimi sometimes wraps in {"data": [...]} when json_object is forced.
+    # Find first '[' and last ']' to slice out the array — Kimi sometimes
+    # leaks one short sentence before/after even with a strict prompt.
+    lb = text.find("[")
+    rb = text.rfind("]")
+    if lb >= 0 and rb > lb:
+        text = text[lb: rb + 1]
     parsed = json.loads(text)
     if isinstance(parsed, dict):
-        # Pick the first array value, or wrap a single dict in a list.
         for v in parsed.values():
             if isinstance(v, list):
                 parsed = v
