@@ -110,23 +110,37 @@ raw JSON array."""
 
 def fetch_pending(limit: int | None, source_filter: str | None,
                   force: bool) -> list[dict]:
-    """Pull rows that still need normalization."""
+    """Pull rows that still need normalization. PostgREST caps each page
+    at 1000 rows by default, so we paginate explicitly."""
     select = ("id,source,source_id,title,mark,mark_original,model,"
               "series_original,complectation,fuel_original,engine_type,year,"
               "displacement,llm_normalized_at")
-    params = [f"select={select}", "order=id.desc"]
+    base = [f"select={select}", "order=id.desc"]
     if source_filter:
-        params.append(f"source=eq.{source_filter}")
+        base.append(f"source=eq.{source_filter}")
     else:
-        params.append(f"source=in.({','.join(CN_SOURCES)})")
+        base.append(f"source=in.({','.join(CN_SOURCES)})")
     if not force:
-        params.append("llm_normalized_at=is.null")
-    if limit:
-        params.append(f"limit={limit}")
-    r = DB._pg_request("GET", "cars?" + "&".join(params))
-    if r.status_code != 200:
-        sys.exit(f"DB read fail: {r.status_code} {r.text[:200]}")
-    return r.json()
+        base.append("llm_normalized_at=is.null")
+
+    out: list[dict] = []
+    page_size = 1000
+    offset = 0
+    while True:
+        params = base + [f"limit={page_size}", f"offset={offset}"]
+        r = DB._pg_request("GET", "cars?" + "&".join(params))
+        if r.status_code != 200:
+            sys.exit(f"DB read fail: {r.status_code} {r.text[:200]}")
+        page = r.json()
+        if not page:
+            break
+        out.extend(page)
+        if limit and len(out) >= limit:
+            return out[:limit]
+        if len(page) < page_size:
+            break
+        offset += page_size
+    return out
 
 
 def build_user_message(rows: list[dict]) -> str:
