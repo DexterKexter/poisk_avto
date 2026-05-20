@@ -60,6 +60,40 @@ def build_listing_url(city_slug: str, path_suffix: str = "") -> str:
 BRAND_HREF_RE = re.compile(r'href="/([a-z]+)/([a-z0-9_-]+)/?"')
 
 
+def _diagnose_empty(city_slug: str, url: str, homepage_html: str) -> None:
+    """Dump everything we can about an empty homepage so we can tell whether
+    Guazi changed HTML / WAF blocked us / proxy creds are missing without
+    re-running CI 3 times."""
+    head = homepage_html[:1500] if homepage_html else "<empty>"
+    title = ""
+    m = re.search(r"<title>(.*?)</title>", homepage_html or "", re.DOTALL)
+    if m:
+        title = m.group(1).strip()[:120]
+    # Pull every href="/.../.../" pattern, not just the brand filter — so we
+    # can see what links the page actually exposes today.
+    all_hrefs = re.findall(r'href="(/[a-zA-Z0-9_./-]+/)"', homepage_html or "")
+    sample_hrefs = sorted(set(all_hrefs))[:20]
+    print(
+        "  ⚠ DIAGNOSE [guazi/{slug}] {url}\n"
+        "    OXY creds present: {oxy}\n"
+        "    Direct Playwright fallback: {pw}\n"
+        "    HTML length: {ln}\n"
+        "    <title>: {title!r}\n"
+        "    sample hrefs ({n}/{tot}): {hrefs}\n"
+        "    HTML preview:\n{preview}\n"
+        "    ---end preview---".format(
+            slug=city_slug, url=url,
+            oxy=bool(OXY_USER and OXY_PASS),
+            pw=not (OXY_USER and OXY_PASS),
+            ln=len(homepage_html or ""), title=title,
+            n=len(sample_hrefs), tot=len(all_hrefs),
+            hrefs=sample_hrefs,
+            preview=head,
+        ),
+        flush=True,
+    )
+
+
 def discover_brand_paths(city_slug: str, homepage_html: str) -> list[str]:
     """Pull all /{city}/{brand}/ URLs from the city homepage navigation."""
     brands: set[str] = set()
@@ -285,13 +319,19 @@ def main() -> None:
         slug = CITIES[city]
         print(f"\n[{city}] /{slug}/")
 
-        homepage = fetch_html(build_listing_url(slug))
+        url_home = build_listing_url(slug)
+        homepage = fetch_html(url_home)
         if not homepage:
             print(f"  city homepage empty — skip")
             continue
         brand_paths = discover_brand_paths(slug, homepage)
         print(f"  discovered {len(brand_paths)} brand subpages, "
               f"fetching {WORKERS}-way parallel")
+        if len(brand_paths) == 0:
+            # Either Guazi changed HTML, WAF is serving a captcha, or we're
+            # on the en.guazi.com placeholder because Oxylabs creds are
+            # missing. Dump enough context to tell which.
+            _diagnose_empty(slug, url_home, homepage)
 
         seen: set[str] = set()
         # Process homepage cards first
