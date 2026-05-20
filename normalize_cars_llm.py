@@ -39,7 +39,7 @@ import db as DB
 sys.stdout.reconfigure(line_buffering=True)
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "moonshotai/kimi-k2.6"
+DEFAULT_MODEL = "deepseek/deepseek-v3.2-exp"  # was kimi-k2.6 — too slow/thinking
 CN_SOURCES = ("che168", "guazi", "autocango")
 
 # Allowed values for engine_type — anything else means LLM made one up
@@ -196,7 +196,15 @@ def call_llm(rows: list[dict], api_key: str, model: str
     rb = text.rfind("]")
     if lb >= 0 and rb > lb:
         text = text[lb: rb + 1]
-    parsed = json.loads(text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as e:
+        # Dump first 1500 chars so we can see whether model truncated,
+        # forgot to close a string, etc.
+        raise RuntimeError(
+            f"JSON parse failed ({e}); first 1500 chars of raw text: "
+            f"{text[:1500]!r}"
+        ) from None
     if isinstance(parsed, dict):
         for v in parsed.values():
             if isinstance(v, list):
