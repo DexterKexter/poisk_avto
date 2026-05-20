@@ -335,61 +335,74 @@ def main() -> None:
 
     print(f"Backend: {DB.backend_name()}")
     print(f"Source: {SOURCE}, batch_size={BATCH_SIZE}, workers={args.workers}")
-    existing = DB.count_cars(SOURCE)
-    print(f"cars[{SOURCE}] already: {existing}")
 
-    ids = DB.get_pending_ids(SOURCE, args.limit)
-    print(f"Loaded {len(ids)} pending IDs for [{SOURCE}]")
-    if not ids:
-        print("Nothing to scrape. Run collect_encar.py first.")
-        return
-
-    batches = [ids[i:i + BATCH_SIZE] for i in range(0, len(ids), BATCH_SIZE)]
-    print(f"\nProcessing {len(batches)} batches of up to {BATCH_SIZE}…\n")
-
+    # Open a sync_log row so the admin dashboard can show this run.
+    # run_url is set by the workflow (github.server_url + repo + run_id) so
+    # each row deep-links back to its GH Actions log.
+    run_id = DB.sync_log_start(SOURCE, os.environ.get("GITHUB_RUN_URL"))
     ok = fail = 0
-    started = time.time()
+    error_message: str | None = None
+    try:
+        existing = DB.count_cars(SOURCE)
+        print(f"cars[{SOURCE}] already: {existing}")
 
-    with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        futures = {pool.submit(fetch_batch, b): b for b in batches}
-        for fut in as_completed(futures):
-            batch = futures[fut]
-            try:
-                cars = fut.result()
-            except Exception as e:
-                cars = None
-                print(f"  batch {batch} EXCEPTION: {e}")
+        ids = DB.get_pending_ids(SOURCE, args.limit)
+        print(f"Loaded {len(ids)} pending IDs for [{SOURCE}]")
+        if not ids:
+            print("Nothing to scrape. Run collect_encar.py first.")
+            return
 
-            if not cars:
-                for cid in batch:
-                    DB.mark_failed(SOURCE, cid)
-                    fail += 1
-                print(f"  batch {batch} FAIL (+{len(batch)} attempts)")
-                continue
+        batches = [ids[i:i + BATCH_SIZE] for i in range(0, len(ids), BATCH_SIZE)]
+        print(f"\nProcessing {len(batches)} batches of up to {BATCH_SIZE}…\n")
 
-            returned_ids: set[str] = set()
-            for car in cars:
-                rec = parse_car(car)
-                if not rec:
+        started = time.time()
+
+        with ThreadPoolExecutor(max_workers=args.workers) as pool:
+            futures = {pool.submit(fetch_batch, b): b for b in batches}
+            for fut in as_completed(futures):
+                batch = futures[fut]
+                try:
+                    cars = fut.result()
+                except Exception as e:
+                    cars = None
+                    print(f"  batch {batch} EXCEPTION: {e}")
+
+                if not cars:
+                    for cid in batch:
+                        DB.mark_failed(SOURCE, cid)
+                        fail += 1
+                    print(f"  batch {batch} FAIL (+{len(batch)} attempts)")
                     continue
-                returned_ids.add(rec["source_id"])
-                if DB.upsert_car(rec):
-                    ok += 1
-                    vin = rec.get("vin") or "—"
-                    print(f"  OK {rec['source_id']} {rec['mark']} {rec['model'][:30]} "
-                          f"{rec['year']} {rec['price_original']} KRW  VIN:{vin}")
-                else:
-                    DB.mark_failed(SOURCE, rec["source_id"])
-                    fail += 1
 
-            for cid in batch:
-                if cid not in returned_ids:
-                    DB.mark_failed(SOURCE, cid)
-                    fail += 1
+                returned_ids: set[str] = set()
+                for car in cars:
+                    rec = parse_car(car)
+                    if not rec:
+                        continue
+                    returned_ids.add(rec["source_id"])
+                    if DB.upsert_car(rec):
+                        ok += 1
+                        vin = rec.get("vin") or "—"
+                        print(f"  OK {rec['source_id']} {rec['mark']} {rec['model'][:30]} "
+                              f"{rec['year']} {rec['price_original']} KRW  VIN:{vin}")
+                    else:
+                        DB.mark_failed(SOURCE, rec["source_id"])
+                        fail += 1
 
-    elapsed = int(time.time() - started)
-    print(f"\nDone in {elapsed}s. OK: {ok}, FAIL: {fail}")
-    print(f"Total in cars[{SOURCE}]: {DB.count_cars(SOURCE)}")
+                for cid in batch:
+                    if cid not in returned_ids:
+                        DB.mark_failed(SOURCE, cid)
+                        fail += 1
+
+        elapsed = int(time.time() - started)
+        print(f"\nDone in {elapsed}s. OK: {ok}, FAIL: {fail}")
+        print(f"Total in cars[{SOURCE}]: {DB.count_cars(SOURCE)}")
+    except Exception as e:
+        import traceback
+        error_message = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        raise
+    finally:
+        DB.sync_log_finish(run_id, added=ok, failed=fail, error_message=error_message)
 
 
 if __name__ == "__main__":
