@@ -5,4 +5,5 @@ openpyxl>=3.1
 # with anti-fingerprinting patches; bypasses many WAFs (Tencent EdgeOne /
 # Cloudflare bot mode) without needing a paid solver service. Used by
 # autocango scrapers via stealth.fetch_protected_html.
-scrapling>=0.2.99
+scrapling[fetchers]>=0.4
+camoufox[geoip]>=0.4
