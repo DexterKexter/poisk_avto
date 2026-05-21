@@ -1,9 +1,12 @@
 name: Scrape Encar
 
 on:
-  schedule:
-    # Hourly. encar API typically returns in 9-15 min so hourly is safe.
-    - cron: '0 * * * *'
+  # Hourly cron paused — Korean inventory is filling up faster than the
+  # Chinese sources right now, so we're freezing Encar while we fix
+  # autocango / che168 / guazi. Re-enable by uncommenting the schedule
+  # block below; manual `workflow_dispatch` still works in the meantime.
+  # schedule:
+  #   - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       pages:
