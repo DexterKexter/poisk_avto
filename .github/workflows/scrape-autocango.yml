@@ -61,9 +61,14 @@ jobs:
         run: |
           pip install -r requirements-scrapling.txt
           # Camoufox = custom Firefox build with stealth patches that
-          # Scrapling drives. The `scrapling install` command downloads
-          # the ~100 MB binary into ~/.scrapling/ once.
-          python -m scrapling install
+          # Scrapling drives. `scrapling install` is the entry-point
+          # script that pulls camoufox + its ~100 MB binary on first run.
+          # (`python -m scrapling install` doesn't work — the package
+          # has no __main__.py.)
+          scrapling install
+          # Camoufox itself also exposes a fetch command — belt-and-braces
+          # in case Scrapling's wrapper changes shape between releases.
+          python -m camoufox fetch || true
           # playwright/chromium kept for any legacy fallback paths
           python -m playwright install chromium --with-deps
 
