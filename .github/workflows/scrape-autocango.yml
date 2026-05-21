@@ -1,10 +1,13 @@
 name: Scrape AutoCango
 
 on:
-  schedule:
-    # Every 12 hours at :45 (offset from all other scrapers).
-    # autocango is an aggregator with a slow refresh rate; twice a day is plenty.
-    - cron: '45 */12 * * *'
+  # 12-hour cron paused. Autocango serves a Tencent TEO CAPTCHA challenge
+  # to GitHub runners, and the universal Oxylabs Realtime API doesn't
+  # solve it — every fetch returns the captcha HTML and runs end with
+  # `Done in 77s. Upserted: 0 new IDs.` Re-enable once we wire a
+  # solver-capable proxy (Oxylabs Web Unblocker / Bright Data Web Unlocker).
+  # schedule:
+  #   - cron: '45 */12 * * *'
   workflow_dispatch:
     inputs:
       cities:
