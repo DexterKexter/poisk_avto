@@ -21,6 +21,7 @@ import traceback
 from typing import Any
 
 import db as DB
+import stealth
 
 SOURCE = "autocango"
 SOURCE_LANGUAGE = "en"
@@ -83,6 +84,140 @@ def build_detail_url(meta: dict, source_id: str) -> str:
     model = (meta or {}).get("model_slug") or "Model"
     model = model.replace(" ", "-")
     return f"{BASE_URL}/sku/{type_slug}-{brand}-{model}-{source_id}"
+
+
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"[ \t]+")
+
+
+def _html_to_text(html: str) -> str:
+    """Strip HTML to a single-spaced text, mimicking innerText closely
+    enough for the regex extractors below."""
+    html = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html,
+                  flags=re.DOTALL | re.IGNORECASE)
+    text = _TAG_RE.sub("\n", html)
+    import html as _html_mod
+    text = _html_mod.unescape(text)
+    text = _WS_RE.sub(" ", text)
+    text = re.sub(r"\n\s*\n+", "\n", text)
+    return text.strip()
+
+
+def extract_detail_from_html(html: str) -> dict:
+    """Python port of extract_detail_js() — runs the same regex extractors
+    against the rendered HTML's text content. Returns the same dict shape
+    so parse_detail_to_car() can stay unchanged."""
+    text = _html_to_text(html)
+
+    def get(pattern: str):
+        m = re.search(pattern, text)
+        return m.group(1).strip() if m else None
+
+    title_m = re.search(r'<h1[^>]*>(.*?)</h1>', html,
+                        re.DOTALL | re.IGNORECASE)
+    if not title_m:
+        title_m = re.search(
+            r'<[^>]+class="[^"]*car-title[^"]*"[^>]*>(.*?)</', html,
+            re.DOTALL | re.IGNORECASE,
+        )
+    title = _TAG_RE.sub("", title_m.group(1)).strip() if title_m else ""
+
+    img_urls = re.findall(
+        r'<img[^>]+src="(https?://[^"]+\.(?:jpe?g|png|webp)[^"]*)"',
+        html, flags=re.IGNORECASE,
+    )
+    images, seen = [], set()
+    for u in img_urls:
+        clean = u.split("?")[0]
+        if (clean.startswith("data:") or "rule-traffic-light" in clean
+                or "logo" in clean.lower()):
+            continue
+        if clean in seen:
+            continue
+        seen.add(clean); images.append(clean)
+        if len(images) >= 30:
+            break
+
+    export_usd = None
+    m = re.search(r"\$\s*([\d,]+)\b", text)
+    if m:
+        try: export_usd = int(m.group(1).replace(",", ""))
+        except ValueError: pass
+    msrp_cny = None
+    m = re.search(r"MSRP[^\d]*¥\s*([\d,]+)", text)
+    if m:
+        try: msrp_cny = int(m.group(1).replace(",", ""))
+        except ValueError: pass
+
+    description = ""
+    ds = text.find("Description")
+    de = text.find("Contact your AutoCango")
+    if ds > 0 and de > ds:
+        description = text[ds + 11:de].strip()
+        description = re.sub(r"Availability Check：[^\n]+", "", description)
+        description = description.replace("Condition：", "").strip()
+
+    accessories = []
+    acc_s = text.find("Accessories")
+    acc_e = text.find("Relevant Car Specs")
+    if acc_s > 0 and acc_e > acc_s:
+        for line in text[acc_s + 11:acc_e].split("\n"):
+            line = line.strip()
+            if line and len(line) < 50:
+                accessories.append(line)
+            if len(accessories) >= 50:
+                break
+
+    city = None
+    m = re.search(
+        r"\b([A-Z][a-z]+(?: [A-Z][a-z]+)?)\s+"
+        r"(?:Anhui|Beijing|Chongqing|Fujian|Gansu|Guangdong|Guangxi|"
+        r"Guizhou|Hainan|Hebei|Heilongjiang|Henan|Hubei|Hunan|Jiangsu|"
+        r"Jiangxi|Jilin|Liaoning|Ningxia|Qinghai|Shaanxi|Shandong|"
+        r"Shanghai|Shanxi|Sichuan|Tianjin|Xinjiang|Tibet|Yunnan|Zhejiang)"
+        r"\s+China\b",
+        text,
+    )
+    if m:
+        city = m.group(1)
+
+    return {
+        "title": title,
+        "images": images,
+        "export_usd": export_usd,
+        "msrp_cny": msrp_cny,
+        "description": description[:4000],
+        "accessories": accessories[:50],
+        "city": city,
+
+        "ref_id":        get(r"Ref ID\s+([A-Z0-9]+)"),
+        "steering":      get(r"Steering\s+(Left|Right)"),
+        "model_code":    get(r"Model Code\s+(\S+)"),
+        "body_type":     get(r"Body Type\s+([A-Za-z\/-]+)"),
+        "color":         get(r"Exterior Color\s+([A-Za-z]+)"),
+        "fuel":          get(r"Fuel\s+([A-Za-z]+)"),
+        "transmission":  get(r"Transmission\s+([A-Za-z\-]+)"),
+        "drivetrain":    get(r"Drivetrain\s+([A-Za-z0-9]+)"),
+
+        "model_year":    get(r"Model Year\s+(\d{4})"),
+        "mileage":       get(r"Mlg\(km\)\s+([\d,]+)"),
+        "engine_cc":     get(r"Engine\(cc\)\s+(\d+|-)"),
+        "seats":         get(r"Seats\s+(\d+)"),
+        "doors":         get(r"Doors\s+(\d+)"),
+        "weight_kg":     get(r"Weight\(kg\)\s+(\d+|-)"),
+        "max_cap_kg":    get(r"Max\.Cap\(kg\)\s+(\d+|-)"),
+        "battery_cap":   get(r"Batt\.Cap\.\(kWh\)\s+([\d.]+|-)"),
+        "range_km":      get(r"Range\(km\)\s+(\d+|-)"),
+        "motor_power":   get(r"Motor Power\(kW\)\s+(\d+|-)"),
+
+        "reg_year_month": get(r"Reg\.\s*Year\s+(\d{4}-\d{1,2})"),
+        "engine":        get(r"Engine\s+(\d+\.\d+[TL]\s+\d+HP\s+L\d+)"),
+        "dimensions":    get(r"Dim\.\(mm\)\s+(\d+\*\d+\*\d+)"),
+        "volume_m3":     get(r"M³\s+([\d.]+|-)"),
+        "brand":         get(r"\bBrand\s+([A-Z][A-Za-z\- ]+?)\s+Series\b"),
+        "series":        get(r"\bSeries\s+([A-Za-z0-9 .\-]+?)\s+(?:Model Year|Engine)"),
+    }
 
 
 def extract_detail_js() -> str:
@@ -340,8 +475,7 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=300)
     args = ap.parse_args()
 
-    from playwright.sync_api import sync_playwright
-
+    
     print(f"Backend: {DB.backend_name()}")
     print(f"Source: {SOURCE}")
 
@@ -377,52 +511,37 @@ def main() -> None:
 
         started = time.time()
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled",
-                      "--no-sandbox", "--disable-dev-shm-usage"],
+        for i, cid in enumerate(ids, 1):
+            meta = metas.get(cid, {})
+            url = build_detail_url(meta, cid)
+            # Two-tier stealth: Camoufox → Oxylabs CN-geo. wait_selector
+            # holds the browser open until the detail content lands so we
+            # don't parse half-rendered HTML.
+            html = stealth.fetch_protected_html(
+                url, wait_selector="h1, .car-title",
             )
-            ctx = browser.new_context(user_agent=UA,
-                                      viewport={"width": 1366, "height": 768},
-                                      locale="en-US")
-            ctx.add_init_script(
-                "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-            )
-            # Warm the WAF cookies by visiting listing page once
-            warmup = ctx.new_page()
+            if not html or stealth.looks_like_challenge(html):
+                fail += 1
+                DB.mark_failed(SOURCE, cid)
+                print(f"  [{i}/{len(ids)}] {cid} FETCH/CHALLENGE FAIL")
+                continue
             try:
-                warmup.goto("https://www.autocango.com/usedcar/excludeSold=true",
-                            wait_until="networkidle", timeout=60_000)
-            except Exception:
-                pass
-            warmup.close()
-            page = ctx.new_page()
+                detail = extract_detail_from_html(html)
+            except Exception as e:
+                fail += 1
+                DB.mark_failed(SOURCE, cid)
+                print(f"  [{i}/{len(ids)}] {cid} PARSE FAIL: {e}")
+                continue
 
-            for i, cid in enumerate(ids, 1):
-                meta = metas.get(cid, {})
-                url = build_detail_url(meta, cid)
-                try:
-                    page.goto(url, wait_until="networkidle", timeout=60_000)
-                    page.wait_for_timeout(1000)
-                    detail = page.evaluate(extract_detail_js())
-                except Exception as e:
-                    fail += 1
-                    DB.mark_failed(SOURCE, cid)
-                    print(f"  [{i}/{len(ids)}] {cid} FAIL: {e}")
-                    continue
-
-                rec = parse_detail_to_car(cid, detail, meta)
-                if DB.upsert_car(rec):
-                    ok += 1
-                    print(f"  [{i}/{len(ids)}] {cid} OK {rec['mark']} {rec['model']} "
-                          f"{rec['year']} ${rec['price_original']} {rec['km_age']}km")
-                else:
-                    fail += 1
-                    DB.mark_failed(SOURCE, cid)
-                    print(f"  [{i}/{len(ids)}] {cid} DB FAIL")
-
-            browser.close()
+            rec = parse_detail_to_car(cid, detail, meta)
+            if DB.upsert_car(rec):
+                ok += 1
+                print(f"  [{i}/{len(ids)}] {cid} OK {rec['mark']} {rec['model']} "
+                      f"{rec['year']} ${rec['price_original']} {rec['km_age']}km")
+            else:
+                fail += 1
+                DB.mark_failed(SOURCE, cid)
+                print(f"  [{i}/{len(ids)}] {cid} DB FAIL")
 
         elapsed = int(time.time() - started)
         print(f"\nDone in {elapsed}s. OK: {ok}, FAIL: {fail}")
