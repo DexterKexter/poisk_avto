@@ -1,18 +1,18 @@
-"""guazi.com detail-page scraper — direct HTTP, extracts inspection data.
+"""en.guazi.com detail-page scraper — Playwright-rendered.
 
-Each guazi detail page contains inline JSON (escaped) with detailed inspection
-scorecard:
-  - 检测等级 (inspection grade)
-  - 三电附件检测 / 车身外观 / 内饰及配置 / 车身骨架 / 机舱工况 — issue counts
-  - 保险理赔 (insurance claim count)
-  - 电池容量 / 新车续航 / 快充 (battery details for EVs)
+For each pending guazi listing, opens the English detail page and extracts
+ALL available fields:
+  - Brand, model, trim (already English)
+  - Price in USD (FOB export price)
+  - Year, mileage, color, transmission, fuel, drive type, displacement, HP
+  - Steering side (LHD/RHD), keys count
+  - Inspection report: overall score, exterior/interior scores, accident
+    history, paint readings, tire condition
+  - Labels (Inspected, Ready to Ship, Hot Deal, ...)
+  - Photos (guazistatic-global CDN — no Chrome ORB issues)
+  - Seller/dealer info
 
-VIN is NOT exposed (guazi hides until dealer contact).
-Photos: image-public.guazistatic.com — append `?x-bce-process=...resize,w_1920,h_1280`
-for Full HD.
-
-Usage:
-    python scrape_guazi.py [--limit 1000] [--workers 4]
+Env: SUPABASE_URL, SUPABASE_KEY
 """
 
 import argparse
@@ -22,441 +22,326 @@ import re
 import sys
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
-
-import requests
-from playwright.sync_api import sync_playwright
 
 import db as DB
 
 sys.stdout.reconfigure(line_buffering=True)
 
 SOURCE = "guazi"
-SOURCE_LANGUAGE = "zh"
-PRICE_CURRENCY = "CNY"
-KM_AGE_UNIT = "km"
-
+BASE_URL = "https://en.guazi.com"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-HEADERS = {
-    "User-Agent": UA,
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    "Referer": "https://www.guazi.com/",
+
+
+def extract_detail(page) -> dict:
+    """Extract all fields from a rendered en.guazi.com detail page."""
+    return page.evaluate(r"""() => {
+        const r = {};
+        const text = document.body.innerText || '';
+        const html = document.body.innerHTML || '';
+
+        r.title = document.title || '';
+        const ogTitle = document.querySelector('meta[property="og:title"]');
+        if (ogTitle) r.ogTitle = ogTitle.content;
+
+        // Photos
+        const photos = [];
+        document.querySelectorAll('img[src*="guazi"], img[src*="oversea"], img[src*="qnbdp"]').forEach(img => {
+            const src = img.src || img.dataset?.src || '';
+            if (src && !src.includes('favicon') && !src.includes('.svg') &&
+                !src.includes('icon') && !photos.includes(src) &&
+                (src.includes('.jpg') || src.includes('.png') || src.includes('.webp') ||
+                 src.includes('qnbdp') || src.includes('ovp/product'))) {
+                photos.push(src);
+            }
+        });
+        r.photos = photos;
+
+        // Price (USD)
+        const priceMatch = text.match(/(?:FOB|Price|Starting)\s*(?:Price)?\s*:?\s*\$\s*([\d,]+)/i)
+            || text.match(/\$\s*([\d,]+(?:\.\d{2})?)/);
+        if (priceMatch) r.priceUsd = parseInt(priceMatch[1].replace(/,/g, ''), 10);
+
+        // Specs (key-value pairs from spec tables/lists)
+        const specs = {};
+        document.querySelectorAll('tr, [class*="spec"], [class*="info"], [class*="param"], [class*="detail"]').forEach(el => {
+            const cells = el.querySelectorAll('td, th, span, div, dt, dd, p');
+            for (let i = 0; i < cells.length - 1; i += 2) {
+                const key = (cells[i].innerText || '').trim().replace(/:$/, '');
+                const val = (cells[i + 1].innerText || '').trim();
+                if (key && val && key.length < 40 && val.length < 200) specs[key] = val;
+            }
+        });
+        r.specs = specs;
+
+        // Year
+        const yearMatch = text.match(/(?:Year|Model Year|Registration)\s*:?\s*(\d{4})/i)
+            || r.title?.match(/(\d{4})/);
+        if (yearMatch) r.year = parseInt(yearMatch[1], 10);
+
+        // Mileage
+        const mileMatch = text.match(/(?:Mileage|Odometer|KM)\s*:?\s*([\d,]+)\s*(?:km|mi)/i);
+        if (mileMatch) r.mileageKm = parseInt(mileMatch[1].replace(/,/g, ''), 10);
+
+        // Color
+        const colorMatch = text.match(/(?:Exterior Color|Color|Colour)\s*:?\s*([A-Za-z\s]+?)(?:\n|,|$)/i);
+        if (colorMatch) r.color = colorMatch[1].trim();
+
+        // Interior
+        const intMatch = text.match(/(?:Interior Color|Interior)\s*:?\s*([A-Za-z\s]+?)(?:\n|,|$)/i);
+        if (intMatch) r.interiorColor = intMatch[1].trim();
+
+        // Transmission
+        const transMatch = text.match(/(?:Transmission|Gearbox)\s*:?\s*([A-Za-z0-9\s-]+?)(?:\n|,|$)/i);
+        if (transMatch) r.transmission = transMatch[1].trim();
+
+        // Fuel
+        const fuelMatch = text.match(/(?:Fuel|Fuel Type|Energy)\s*:?\s*([A-Za-z\s/+-]+?)(?:\n|,|$)/i);
+        if (fuelMatch) r.fuel = fuelMatch[1].trim();
+
+        // Drive
+        const driveMatch = text.match(/(?:Drive Type|Drivetrain|Drive)\s*:?\s*(AWD|FWD|RWD|4WD|[A-Za-z\s-]+?)(?:\n|,|$)/i);
+        if (driveMatch) r.drive = driveMatch[1].trim();
+
+        // Displacement
+        const dispMatch = text.match(/(?:Displacement|Engine|Engine Size)\s*:?\s*(\d+\.?\d*)\s*(?:L|T|cc)/i);
+        if (dispMatch) r.displacement = parseFloat(dispMatch[1]);
+
+        // HP
+        const hpMatch = text.match(/(\d+)\s*(?:HP|hp|horsepower|PS|kW)/i);
+        if (hpMatch) r.horsePower = parseInt(hpMatch[1], 10);
+
+        // Steering
+        const steerMatch = text.match(/(?:Steering|Wheel Position)\s*:?\s*(LHD|RHD|Left|Right)/i);
+        if (steerMatch) r.steering = steerMatch[1].includes('L') || steerMatch[1].includes('Left') ? 'LHD' : 'RHD';
+
+        // Body type
+        const bodyMatch = text.match(/(?:Body Type|Vehicle Type)\s*:?\s*(Sedan|SUV|Hatchback|Coupe|Convertible|Van|MPV|Wagon|Truck|Pickup)/i);
+        if (bodyMatch) r.bodyType = bodyMatch[1];
+
+        // Keys
+        const keysMatch = text.match(/(\d)\s*(?:key|keys)/i);
+        if (keysMatch) r.keysCount = parseInt(keysMatch[1], 10);
+
+        // VIN
+        const vinMatch = text.match(/(?:VIN|Vehicle Identification)\s*:?\s*([A-HJ-NPR-Z0-9]{17})/i)
+            || html.match(/[A-HJ-NPR-Z0-9]{17}/);
+        if (vinMatch) r.vin = vinMatch[1] || vinMatch[0];
+
+        // Owners
+        const ownersMatch = text.match(/(\d)\s*(?:owner|previous owner)/i);
+        if (ownersMatch) r.ownersCount = parseInt(ownersMatch[1], 10);
+
+        // Reg date
+        const regMatch = text.match(/(?:Registration|First Registered?|Reg\.? Date)\s*:?\s*(\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?)/i);
+        if (regMatch) r.regDate = regMatch[1];
+
+        // Inspection score
+        const inspMatch = text.match(/(?:Inspection|Condition)\s*(?:Score|Rating|Grade)\s*:?\s*(\d+\.?\d*)\s*(?:\/\s*(\d+))?/i);
+        if (inspMatch) {
+            r.inspectionScore = parseFloat(inspMatch[1]);
+            if (inspMatch[2]) r.inspectionMax = parseFloat(inspMatch[2]);
+        }
+
+        // Accident
+        r.accidentFree = /(?:no accident|accident[- ]?free|0 accident)/i.test(text);
+        if (/(?:has accident|accident history|previous accident|repaired)/i.test(text)) r.accidentFree = false;
+
+        // Labels
+        const labels = [];
+        document.querySelectorAll('[class*="tag"], [class*="label"], [class*="badge"]').forEach(el => {
+            const t = (el.innerText || '').trim();
+            if (t && t.length < 50 && !t.includes('\n') && !/^\d+$/.test(t)) labels.push(t);
+        });
+        r.labels = [...new Set(labels)];
+
+        // Seller
+        const sellerMatch = text.match(/(?:Dealer|Seller|Shop)\s*:?\s*([^\n]{3,60})/i);
+        if (sellerMatch) r.sellerName = sellerMatch[1].trim();
+
+        // Description
+        const descEl = document.querySelector('[class*="description"], [class*="remark"]');
+        if (descEl) r.description = descEl.innerText?.substring(0, 2000) || '';
+
+        // Raw text for debug
+        r.rawTextSample = text.substring(0, 3000);
+
+        return r;
+    }""")
+
+
+def parse_brand_model(alt: str, meta_mark: str) -> tuple[str, str, str]:
+    s = alt.strip()
+    if s.startswith("Used "):
+        s = s[5:]
+    m = re.match(r'^(.+?)\s+(\d{4})\s*(.*)', s)
+    if m:
+        brand_model = m.group(1).strip()
+        trim = m.group(3).strip()
+        if meta_mark and brand_model.lower().startswith(meta_mark.lower()):
+            model = brand_model[len(meta_mark):].strip()
+            return meta_mark, model or brand_model, trim
+        tokens = brand_model.split(" ", 1)
+        return tokens[0], tokens[1] if len(tokens) > 1 else "", trim
+    return meta_mark or "", s, ""
+
+
+FUEL_TO_ENGINE = {
+    "petrol": "Petrol", "gasoline": "Petrol", "gas": "Petrol",
+    "diesel": "Diesel",
+    "electric": "Electric", "bev": "Electric", "ev": "Electric",
+    "hybrid": "Hybrid", "hev": "Hybrid", "mhev": "Hybrid",
+    "plug-in hybrid": "PHEV", "phev": "PHEV", "plug in": "PHEV",
+    "range extender": "EREV", "erev": "EREV", "reev": "EREV",
+    "extended range": "EREV",
+    "hydrogen": "Hydrogen", "fcev": "Hydrogen",
+    "cng": "CNG", "lpg": "LPG",
 }
 
-BASE_URL = "https://www.guazi.com"
 
-# Photo HD: replace `w_330,h_220` (or any small) → 1920x1280
-PHOTO_HD_TARGET = "?x-bce-process=image/quality,q_95/resize,m_fill,w_1920,h_1280"
-
-from chinese_maps import (
-    BRAND_MAP, COLOR_MAP, FUEL_MAP, TRANSMISSION_MAP, DRIVE_MAP, CITY_MAP,
-)
-
-
-def tr(value: str, mapping: dict[str, str]) -> str:
-    if not value:
-        return ""
-    return mapping.get(value.strip(), value.strip())
-
-
-def upgrade_photo(url: str) -> str:
-    """Strip any existing x-bce-process and add HD variant."""
-    base = url.split("?")[0]
-    return base + PHOTO_HD_TARGET
-
-
-def parse_int(s: str | None) -> int | None:
-    if not s:
+def fuel_to_engine_type(fuel: str | None) -> str | None:
+    if not fuel:
         return None
+    fl = fuel.lower().strip()
+    for key, val in FUEL_TO_ENGINE.items():
+        if key in fl:
+            return val
+    return fuel
+
+
+def scrape_one(browser_ctx, source_id: str, meta: dict) -> dict | None:
+    url = meta.get("url") or f"{BASE_URL}/used-cars/detail/{source_id}/"
+    page = browser_ctx.new_page()
     try:
-        return int(re.sub(r"[^\d]", "", str(s)))
-    except ValueError:
+        page.goto(url, wait_until="networkidle", timeout=30_000)
+        page.wait_for_timeout(3000)
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(2000)
+        d = extract_detail(page)
+    except Exception as e:
+        print(f"  ! {source_id} page error: {e}", flush=True)
         return None
-
-
-def parse_mileage_km(s: str | None) -> int | None:
-    if not s:
-        return None
-    m = re.search(r"([\d.]+)\s*万", s)
-    if m:
-        return int(float(m.group(1)) * 10_000)
-    return parse_int(s)
-
-
-def parse_yyyymm(s: str | None) -> tuple[int | None, str | None]:
-    if not s:
-        return None, None
-    m = re.match(r"(\d{4})-(\d{1,2})", s)
-    if m:
-        y, mo = int(m.group(1)), int(m.group(2))
-        return y, f"{y}-{mo:02d}-01"
-    m2 = re.match(r"(\d{4})", s)
-    if m2:
-        return int(m2.group(1)), f"{m2.group(1)}-01-01"
-    return None, None
-
-
-# guazi embeds spec rows in escaped JSON like:
-#   \"label\":\"表显里程\",\"value\":\"3.37万公里\"
-SPEC_PAIRS_RE = re.compile(
-    r'\\"label\\":\\"([^\\]+?)\\",\\"value\\":\\"([^\\]*?)\\"')
-
-
-def extract_spec_pairs(html: str) -> dict[str, str]:
-    """All label:value pairs (Chinese-labeled spec rows)."""
-    out: dict[str, str] = {}
-    for k, v in SPEC_PAIRS_RE.findall(html):
-        # Keep first occurrence
-        if k not in out:
-            out[k] = v
-    return out
-
-
-def extract_photos(html: str) -> list[str]:
-    raw = re.findall(
-        r'https?://[\w.-]*\.guazistatic\.com/[^"\'\s<>]+?\.(?:jpg|webp|png)',
-        html)
-    urls = list(dict.fromkeys(raw))
-    # Skip tiny icons (qnbdp106... is a small UI asset prefix)
-    car_photos = [u for u in urls
-                  if "qnbdp7206x" in u or "qnbdp720" in u or "carpic" in u]
-    return [upgrade_photo(u) for u in car_photos]
-
-
-VERIFIED_BADGES = [
-    "已检测", "纯电动", "瓜子认证", "瓜子保", "保养记录", "无事故",
-    "无重大事故", "无泡水", "瓜子精选", "瓜子放心购", "已减",
-]
-
-
-def extract_badges(html: str) -> dict[str, int]:
-    return {b: html.count(b) for b in VERIFIED_BADGES if html.count(b) > 0}
-
-
-def parse_card(html: str, meta: dict, clue_id: str) -> dict | None:
-    pairs = extract_spec_pairs(html)
-    badges = extract_badges(html)
-    photos = extract_photos(html)
-
-    # Title from page <title>
-    title_m = re.search(r"<title>([^<]+)</title>", html)
-    full_title = (title_m.group(1) if title_m
-                  else meta.get("title") or "")
-    # Guazi serves a generic "China Used Cars Export & Auction | Second Hand Cars - Guazi"
-    # title when the page is rate-limited or blocked. Skip parsing entirely.
-    if not full_title.startswith("二手") and "Second Hand Cars" in full_title:
-        return None
-    # Title example: "二手哪吒汽车 哪吒N01 2020款 380t 行业定制版报价..."
-    short_title = re.sub(r"^二手", "", full_title).split("报价")[0].strip()
-    parts = short_title.split(" ", 1) if " " in short_title else [short_title, ""]
-    brand_zh = parts[0] if parts else ""
-    series_complectation = parts[1] if len(parts) > 1 else ""
-
-    # Resolve brand → English via shared map (longest match first)
-    mark_zh = ""
-    sorted_prefixes = sorted(BRAND_MAP, key=len, reverse=True)
-    for prefix in sorted_prefixes:
-        if brand_zh.startswith(prefix):
-            mark_zh = prefix
-            series_complectation = (brand_zh[len(prefix):]
-                                    + " " + series_complectation).strip()
-            break
-    mark_en = tr(mark_zh, BRAND_MAP) or brand_zh
-    # The series often repeats the brand name (e.g. "哪吒汽车 哪吒N01") — strip it too
-    for prefix in sorted_prefixes:
-        if series_complectation.startswith(prefix):
-            series_complectation = series_complectation[len(prefix):].strip()
-            break
-
-    series_complectation = series_complectation.strip()
-    # First word after brand is usually series
-    if " " in series_complectation:
-        series_zh, complectation_zh = series_complectation.split(" ", 1)
-    else:
-        series_zh, complectation_zh = series_complectation, ""
-
-    # year = model year (from "2020款" in title), reg_date = first registration
-    _, reg_iso = parse_yyyymm(pairs.get("首次上牌") or pairs.get("上牌时间"))
-    year_match = re.search(r"(\d{4})\s*款", short_title)
-    if year_match:
-        year = int(year_match.group(1))
-    else:
-        year, _ = parse_yyyymm(pairs.get("首次上牌") or pairs.get("上牌时间"))
-    mileage_km = parse_mileage_km(pairs.get("表显里程")) or meta.get("mileage_km")
-    transfers = parse_int(pairs.get("过户次数"))
-    color_zh = pairs.get("车身颜色", "")
-    transmission_zh = pairs.get("变速箱", "")
-    drive_zh = pairs.get("驱动方式", "")
-    fuel_zh = pairs.get("能源类型") or pairs.get("燃料类型", "")
-    displacement = pairs.get("发动机", "")
-    # Numeric liters for the main column (e.g. "2.0L" → 2.0). EVs report "0.0L".
-    disp_match = re.search(r"([\d.]+)", displacement or "")
-    displacement_l = float(disp_match.group(1)) if disp_match else None
-    if displacement_l == 0:
-        displacement_l = None
-    emission = pairs.get("排放标准", "")
-
-    # Inspection scorecard fields
-    inspection = {
-        "grade":           pairs.get("检测等级"),
-        "ev_components":   pairs.get("三电附件检测"),
-        "body_exterior":   pairs.get("车身外观"),
-        "interior":        pairs.get("内饰及配置"),
-        "frame":           pairs.get("车身骨架"),
-        "engine_bay":      pairs.get("机舱工况"),
-        "insurance_claims": pairs.get("保险理赔"),
-        "guarantee":       pairs.get("车况保障"),
-    }
-    inspection = {k: v for k, v in inspection.items() if v}
-
-    # Flat column: "2次理赔" → 2
-    claims_raw = inspection.get("insurance_claims") or ""
-    claims_digits = re.sub(r"\D", "", claims_raw)
-    insurance_claims_count = int(claims_digits) if claims_digits else None
-
-    # Battery details (EVs)
-    battery = {
-        "capacity_kwh":     pairs.get("电池容量"),
-        "type":             pairs.get("电池类型"),
-        "new_range_km":     pairs.get("新车续航"),
-        "fast_charge":      pairs.get("快充功能"),
-        "fast_charge_time": pairs.get("快充"),
-        "drive_motor":      pairs.get("驱动电机"),
-    }
-    battery = {k: v for k, v in battery.items() if v}
-
-    source_data: dict[str, Any] = {
-        "trust_badges":  badges,
-        "transfers":     transfers,
-        "inspection":    inspection,
-        "battery":       battery if battery else None,
-        "emission":      emission or None,
-        "displacement":  displacement or None,
-        "source_city":   pairs.get("车源地"),
-        "clue_id":       clue_id,
-    }
-    source_data = {k: v for k, v in source_data.items() if v is not None}
-
-    detail_url = meta.get("url") or f"{BASE_URL}/car-detail/c{clue_id}.html"
-    city_raw = meta.get("city") or ""
-    # Defensive: pending rows from older collectors may still carry raw Chinese.
-    city_en = CITY_MAP.get(city_raw, city_raw)
-    city_zh = next((zh for zh, en in CITY_MAP.items() if en == city_en), "")
-    # If we couldn't translate (city stayed Chinese), keep that as city_zh too.
-    if not city_zh and re.search(r"[一-龥]", city_raw):
-        city_zh = city_raw
-        city_en = None
-
-    ts = DB.now_iso()
-    return {
-        "source": SOURCE,
-        "source_id": str(clue_id),
-        "source_language": SOURCE_LANGUAGE,
-        "url": detail_url,
-        "title": short_title,
-
-        "mark_original": mark_zh or brand_zh or None,
-        "mark": mark_en or None,
-        "series_original": series_zh or None,
-        # Model is bare series (without brand) — frontend renders mark separately
-        "model": (series_zh.replace("系", " Series")
-                           .replace("级", " Class").strip()) or None,
-        "complectation": complectation_zh or None,
-        "year": year,
-        "reg_date": reg_iso,
-
-        "price_original": meta.get("price_cny"),
-        "price_currency": PRICE_CURRENCY,
-
-        "km_age_original": mileage_km,
-        "km_age_unit": KM_AGE_UNIT,
-        "km_age": mileage_km,
-
-        "color_original": color_zh,
-        "color": tr(color_zh, COLOR_MAP) or None,
-        "engine_type": tr(fuel_zh, FUEL_MAP) or None,
-        "fuel_original": fuel_zh or None,
-        "transmission_original": transmission_zh or None,
-        "transmission_type": tr(transmission_zh, TRANSMISSION_MAP) or None,
-        "drive_type": tr(drive_zh, DRIVE_MAP) or None,
-        "drive_original": drive_zh or None,
-        "displacement": displacement_l,
-
-        "city_original": city_zh or None,
-        "city": city_en or None,
-
-        "vin": None,  # guazi hides
-
-        "owners_count": transfers,
-        "insurance_claims_count": insurance_claims_count,
-
-        "images": photos,
-        "image_count": len(photos),
-
-        "source_data": source_data,
-        "first_seen": ts,
-        "last_seen": ts,
-    }
-
-
-class WorkerCtx:
-    """Per-thread playwright session — guazi detail pages also have anti-bot."""
-    def __init__(self):
-        self.pw = None
-        self.browser = None
-        self.ctx = None
-        self.page = None
-
-    def __enter__(self):
-        self.pw = sync_playwright().start()
-        self.browser = self.pw.chromium.launch(
-            headless=True,
-            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-        )
-        self.ctx = self.browser.new_context(
-            user_agent=UA, locale="zh-CN", ignore_https_errors=True,
-            viewport={"width": 1366, "height": 900},
-        )
-        self.ctx.add_init_script(
-            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-        )
-        self.page = self.ctx.new_page()
-        return self.page
-
-    def __exit__(self, *_):
-        try:
-            self.browser.close()
-        finally:
-            self.pw.stop()
-
-
-def fetch_detail(url: str, page=None) -> str | None:
-    """Fetch via existing playwright page if given, else open fresh."""
-    if page is None:
-        with WorkerCtx() as p:
-            return fetch_detail(url, p)
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-        page.wait_for_timeout(800)
-        if "captcha" in page.url:
-            return None
-        html = page.content()
-        if len(html) < 5000:
-            return None
-        return html
-    except Exception:
-        return None
-
-
-def fetch_pending_rows(limit: int) -> list[dict]:
-    r = DB._pg_request(
-        "GET",
-        f"pending_ids?source=eq.{SOURCE}"
-        f"&failed_attempts=lt.{DB.QUARANTINE_THRESHOLD}"
-        f"&select=source_id,metadata&limit={limit * 3}",
-    )
-    if r.status_code != 200:
-        return []
-    pending = r.json()
-    r2 = DB._pg_request("GET", f"cars?source=eq.{SOURCE}&select=source_id")
-    scraped = {row["source_id"] for row in r2.json()} if r2.status_code == 200 else set()
-    return [p for p in pending if str(p["source_id"]) not in scraped][:limit]
-
-
-def scrape_batch(rows: list[dict]) -> list[tuple[str, bool, str]]:
-    """Per-batch playwright session. On captcha, restart browser context once."""
-    results: list[tuple[str, bool, str]] = []
-    captcha_streak = 0
-    ctx = WorkerCtx()
-    page = ctx.__enter__()
-    try:
-        for row in rows:
-            clue_id = row["source_id"]
-            meta = row.get("metadata") or {}
-            url = meta.get("url") or f"{BASE_URL}/car-detail/c{clue_id}.html"
-            html = fetch_detail(url, page)
-            if not html:
-                captcha_streak += 1
-                results.append((clue_id, False, "fetch failed"))
-                # 3 fails in a row → recycle browser
-                if captcha_streak >= 3:
-                    ctx.__exit__(None, None, None)
-                    ctx = WorkerCtx()
-                    page = ctx.__enter__()
-                    captcha_streak = 0
-                continue
-            captcha_streak = 0
-            rec = parse_card(html, meta, clue_id)
-            if not rec:
-                results.append((clue_id, False, "parse failed"))
-                continue
-            ok = DB.upsert_car(rec)
-            results.append((clue_id, ok, ""))
     finally:
-        ctx.__exit__(None, None, None)
-    return results
+        page.close()
+
+    if not d:
+        return None
+
+    alt = meta.get("alt") or d.get("ogTitle") or d.get("title") or ""
+    meta_mark = meta.get("mark", "")
+    mark, model, trim = parse_brand_model(alt, meta_mark)
+
+    price_usd = d.get("priceUsd") or meta.get("price_usd")
+    year = d.get("year") or meta.get("year")
+    mileage = d.get("mileageKm") or meta.get("mileage_km")
+    engine_type = fuel_to_engine_type(d.get("fuel"))
+
+    inspection_data = {}
+    if d.get("inspectionScore") is not None:
+        inspection_data["overall_score"] = d["inspectionScore"]
+    if d.get("inspectionMax"):
+        inspection_data["max_score"] = d["inspectionMax"]
+    if d.get("specs"):
+        inspection_data["specs"] = d["specs"]
+
+    rec = {
+        "source": SOURCE,
+        "source_id": source_id,
+        "url": url,
+        "title": d.get("ogTitle") or d.get("title") or alt,
+        "mark": mark,
+        "model": model,
+        "complectation": trim,
+        "year": year,
+        "price_original": price_usd,
+        "price_currency": "USD",
+        "km_age_original": mileage,
+        "km_age_unit": "km",
+        "km_age": mileage,
+        "color": d.get("color"),
+        "interior_color_original": d.get("interiorColor"),
+        "body_type": d.get("bodyType"),
+        "engine_type": engine_type,
+        "fuel_original": d.get("fuel"),
+        "transmission_type": d.get("transmission"),
+        "drive_type": d.get("drive"),
+        "displacement": d.get("displacement"),
+        "horse_power": d.get("horsePower"),
+        "steering": d.get("steering"),
+        "keys_count": d.get("keysCount"),
+        "vin": d.get("vin"),
+        "owners_count": d.get("ownersCount"),
+        "reg_date": d.get("regDate"),
+        "description": d.get("description"),
+        "images": d.get("photos") or [],
+        "image_count": len(d.get("photos") or []),
+        "inspection_score": d.get("inspectionScore"),
+        "accident_free": d.get("accidentFree"),
+        "inspection_data": inspection_data if inspection_data else None,
+        "labels": d.get("labels") if d.get("labels") else None,
+        "export_ready": bool(d.get("labels") and any(
+            "export" in l.lower() or "ready" in l.lower() or "inspected" in l.lower()
+            for l in d["labels"])),
+        "seller_type": "dealer",
+        "source_language": "en",
+        "source_data": {"raw_text_sample": d.get("rawTextSample", "")[:1000]},
+    }
+    return {k: v for k, v in rec.items() if v is not None}
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--limit", type=int, default=2000)
-    ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--limit", type=int, default=1000)
+    ap.add_argument("--workers", type=int, default=3)
     args = ap.parse_args()
 
     if not DB.USE_POSTGRES:
         sys.exit("Need Postgres")
 
-    # Open a sync_log row so the admin dashboard can show this run.
-    run_id = DB.sync_log_start(SOURCE, os.environ.get("GITHUB_RUN_URL"))
-    ok_count = 0
-    fail_count = 0
-    error_message: str | None = None
-    try:
-        pending = fetch_pending_rows(args.limit)
-        if not pending:
-            print("No pending IDs")
-            return
-        print(f"Scraping {len(pending)} guazi cards with {args.workers} workers "
-              f"(batches of ~20 per playwright session)")
+    pending = DB.get_pending_ids(SOURCE, args.limit)
+    print(f"Pending guazi detail pages: {len(pending)}", flush=True)
+    if not pending:
+        return
 
-        # Split pending into batches per worker (one playwright session per batch,
-        # reused for ~20 urls before recycling — keeps cookies fresh but avoids
-        # per-request browser startup cost).
-        BATCH_SIZE = 20
-        batches = [pending[i:i+BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)]
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage",
+                  "--disable-blink-features=AutomationControlled"])
+        ctx = browser.new_context(
+            user_agent=UA,
+            viewport={"width": 1366, "height": 3000},
+            locale="en-US",
+        )
+        ctx.add_init_script(
+            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+        )
 
-        started = time.time()
-        processed = 0
+        start = time.time()
+        ok = fail = 0
+        for i, (source_id, meta_json) in enumerate(pending, 1):
+            meta = json.loads(meta_json) if isinstance(meta_json, str) else (meta_json or {})
+            rec = scrape_one(ctx, source_id, meta)
+            if rec:
+                if DB.upsert_car(rec):
+                    ok += 1
+                else:
+                    fail += 1
+            else:
+                DB.mark_failed(SOURCE, source_id)
+                fail += 1
 
-        with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futs = {ex.submit(scrape_batch, b): b for b in batches}
-            for fut in as_completed(futs):
-                try:
-                    results = fut.result()
-                except Exception:
-                    traceback.print_exc()
-                    fail_count += len(futs[fut])
-                    continue
-                for cid, ok, err in results:
-                    processed += 1
-                    if ok:
-                        ok_count += 1
-                    else:
-                        DB.mark_failed(SOURCE, cid)
-                        fail_count += 1
-                elapsed = int(time.time() - started)
-                print(f"  batch done: {processed}/{len(pending)} "
-                      f"(ok={ok_count}, fail={fail_count}, {elapsed}s)")
+            if i % 10 == 0 or i == len(pending):
+                rate = i / max(time.time() - start, 1e-3)
+                eta = (len(pending) - i) / max(rate, 1e-3)
+                print(f"  [{i}/{len(pending)}] ok={ok} fail={fail} "
+                      f"{rate:.1f}/s ETA {eta/60:.1f}m", flush=True)
 
-        elapsed = int(time.time() - started)
-        print(f"\nDone in {elapsed}s. OK: {ok_count}, FAIL: {fail_count}")
-    except Exception as e:
-        error_message = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-        raise
-    finally:
-        DB.sync_log_finish(run_id, added=ok_count, failed=fail_count, error_message=error_message)
+        browser.close()
+
+    print(f"\nDone in {(time.time()-start)/60:.1f}m. "
+          f"Scraped: {ok}, failed: {fail}", flush=True)
 
 
 if __name__ == "__main__":
