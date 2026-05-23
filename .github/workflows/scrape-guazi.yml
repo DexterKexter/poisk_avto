@@ -1,74 +1,88 @@
-name: Scrape guazi (en.guazi.com)
+name: Scrape guazi
 
 on:
   schedule:
     # Every 2 hours at :30 (offset from encar :00 and che168 :15).
+    # Typical run 15-35 min, fits comfortably in a 2h slot.
     - cron: '30 */2 * * *'
   workflow_dispatch:
     inputs:
-      brands:
-        description: 'CSV of brand names to scrape (empty = all from DB)'
+      cities:
         required: false
-        default: ''
-      max_pages:
-        description: 'Max listing pages per brand'
+        default: 'Beijing,Shanghai,Guangzhou,Shenzhen,Chengdu,Hangzhou'
+      pages_per_city:
         required: false
-        default: '10'
+        default: '20'
       min_year:
         required: false
-        default: '2018'
+        default: '2020'
       max_mileage_km:
         required: false
-        default: '150000'
-      min_price_usd:
+        default: '100000'
+      min_price_cny:
         required: false
-        default: '2000'
+        default: '5000'
       collect_limit:
         required: false
         default: '15000'
       scrape_limit:
         required: false
-        default: '1000'
+        default: '5000'
+      workers:
+        required: false
+        default: '8'
 
 concurrency:
   group: scrape-guazi
   cancel-in-progress: false
 
-permissions:
-  contents: read
-
 jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    # GITHUB_RUN_URL is consumed by scrape_*.py -> DB.sync_log_start so each
+    # row in the admin 'Последние запуски' panel deep-links back to the
+    # exact GH Actions run for log inspection.
+    env:
+      GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install deps + playwright
+        # collect_guazi.py uses playwright to bypass guazi's bot detection
+        # on the listing pages; scrape_guazi.py uses direct HTTP.
         run: |
           pip install -r requirements.txt
           pip install playwright
           python -m playwright install chromium --with-deps
 
-      - name: Collect listings from en.guazi.com
+      - name: Collect listings (6 cities + filters)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # Oxylabs proxy with China geo. Without these the collector falls
+          # back to direct Playwright, which gets 301-redirected to
+          # en.guazi.com (US runner) and the homepage returns the English
+          # placeholder with zero brand links — exactly the empty-result
+          # symptom we diagnose below.
+          OXY_USER: ${{ secrets.OXY_USER }}
+          OXY_PASS: ${{ secrets.OXY_PASS }}
         run: |
           python collect_guazi.py \
-            --brands         "${{ inputs.brands || '' }}" \
-            --max-pages      ${{ inputs.max_pages      || 10 }} \
-            --min-year       ${{ inputs.min_year       || 2018 }} \
-            --max-mileage-km ${{ inputs.max_mileage_km || 150000 }} \
-            --min-price-usd  ${{ inputs.min_price_usd  || 2000 }} \
+            --cities         "${{ inputs.cities         || 'Beijing,Shanghai,Guangzhou,Shenzhen,Chengdu,Hangzhou' }}" \
+            --pages-per-city ${{ inputs.pages_per_city || 20 }} \
+            --min-year       ${{ inputs.min_year       || 2020 }} \
+            --max-mileage-km ${{ inputs.max_mileage_km || 100000 }} \
+            --min-price-cny  ${{ inputs.min_price_cny  || 5000 }} \
             --limit          ${{ inputs.collect_limit  || 15000 }}
 
-      - name: Scrape detail pages (Playwright)
+      - name: Scrape detail pages (direct HTTP, parallel)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           python scrape_guazi.py \
-            --limit   ${{ inputs.scrape_limit || 1000 }}
+            --limit   ${{ inputs.scrape_limit || 5000 }} \
+            --workers ${{ inputs.workers      || 8 }}
