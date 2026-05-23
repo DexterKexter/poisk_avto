@@ -173,6 +173,27 @@ def collect_brand(page, mark: str, slug: str, max_pages: int,
 
         cards = extract_cards(page)
         if not cards:
+            debug = page.evaluate("""() => ({
+                title: document.title,
+                url: location.href,
+                bodyLen: document.body?.innerText?.length || 0,
+                bodySnippet: (document.body?.innerText || '').substring(0, 1500),
+                imgCount: document.querySelectorAll('img').length,
+                altImgs: Array.from(document.querySelectorAll('img[alt]'))
+                    .map(i=>i.alt).filter(a=>a.length>5).slice(0,10),
+                detailLinks: Array.from(document.querySelectorAll('a[href*="/detail/"]'))
+                    .map(a=>a.href).slice(0,5),
+            })""")
+            print(f"    page {pg}: 0 cards. title={debug['title']!r}, "
+                  f"bodyLen={debug['bodyLen']}, imgs={debug['imgCount']}, "
+                  f"detailLinks={len(debug.get('detailLinks',[]))}",
+                  flush=True)
+            if debug.get("altImgs"):
+                print(f"    alt samples: {debug['altImgs'][:5]}", flush=True)
+            if debug.get("detailLinks"):
+                print(f"    detail hrefs: {debug['detailLinks']}", flush=True)
+            if pg == 1:
+                print(f"    body: {debug['bodySnippet'][:800]}", flush=True)
             break
 
         for c in cards:

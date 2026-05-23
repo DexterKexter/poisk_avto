@@ -318,10 +318,21 @@ def main() -> None:
             "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
         )
 
+        # Fetch meta for a pending ID
+        def get_meta(sid: str) -> dict:
+            r = DB._pg_request(
+                "GET", f"pending_ids?source=eq.{SOURCE}&source_id=eq.{sid}&select=meta")
+            if r.status_code == 200:
+                rows = r.json()
+                if rows and rows[0].get("meta"):
+                    m = rows[0]["meta"]
+                    return json.loads(m) if isinstance(m, str) else m
+            return {}
+
         start = time.time()
         ok = fail = 0
-        for i, (source_id, meta_json) in enumerate(pending, 1):
-            meta = json.loads(meta_json) if isinstance(meta_json, str) else (meta_json or {})
+        for i, source_id in enumerate(pending, 1):
+            meta = get_meta(source_id)
             rec = scrape_one(ctx, source_id, meta)
             if rec:
                 if DB.upsert_car(rec):
