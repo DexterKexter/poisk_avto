@@ -1,10 +1,17 @@
-"""guazi.com listing collector — direct HTTP, $0.
+"""en.guazi.com listing collector — Playwright-rendered.
+
+Scrapes the English export-oriented version of Guazi which provides:
+  - Brand/model/trim already in English
+  - Prices in USD (FOB)
+  - Photos on guazistatic-global CDN (no Chrome ORB issues)
+  - Export certifications, inspection scores
+  - Only exportable vehicles (exactly what KZ buyers need)
 
 Strategy:
-  - Visit /{city_slug}/buy/ pages (redirects to /{city_slug}/)
-  - HTML has 400 `.car-item` blocks; each has detail URL, title, price, year, mileage, badges
-  - Filter in Python: year ≥ MIN_YEAR, mileage ≤ MAX_MILEAGE_KM, price ≥ MIN_PRICE_CNY
-  - Save to pending_ids with metadata
+  - Navigate to /used-cars/{brand}/page{N}/ with Playwright
+  - Extract car cards from rendered DOM (React Server Components)
+  - Save to pending_ids with metadata for detail scraping
+  - Iterates ALL brands that exist in our `brands` table
 
 Env: SUPABASE_URL, SUPABASE_KEY
 """
@@ -17,329 +24,276 @@ import sys
 import time
 from typing import Any
 
-import requests
-from playwright.sync_api import sync_playwright
-
 import db as DB
 
 sys.stdout.reconfigure(line_buffering=True)
 
 SOURCE = "guazi"
-BASE_URL = "https://www.guazi.com"
+BASE_URL = "https://en.guazi.com"
 
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-HEADERS = {
-    "User-Agent": UA,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    "Referer": "https://www.guazi.com/",
+
+# Brand → slug mapping on en.guazi.com (lowercase, hyphenated).
+# Built from /used-cars/ page links: /used-cars/bmw/, /used-cars/toyota/, etc.
+# For brands not listed here, we generate slug automatically.
+BRAND_SLUG = {
+    "BMW": "bmw", "Audi": "audi", "Mercedes-Benz": "mercedes-benz",
+    "Toyota": "toyota", "Lexus": "lexus", "Honda": "honda",
+    "Hyundai": "hyundai", "Kia": "kia", "Genesis": "genesis",
+    "Volkswagen": "volkswagen", "Porsche": "porsche",
+    "Nissan": "nissan", "Mazda": "mazda", "Subaru": "subaru",
+    "Mitsubishi": "mitsubishi", "Chevrolet": "chevrolet",
+    "Ford": "ford", "Cadillac": "cadillac", "Buick": "buick",
+    "Tesla": "tesla", "BYD": "byd", "Geely": "geely",
+    "Chery": "chery", "Haval": "haval", "Great Wall": "great-wall",
+    "Hongqi": "hongqi", "Changan": "changan", "ChangAn": "changan",
+    "Li Auto": "li-auto", "Lixiang": "li-auto",
+    "NIO": "nio", "XPeng": "xpeng", "Zeekr": "zeekr",
+    "Voyah": "voyah", "AITO": "aito", "Wuling": "wuling",
+    "WuLing": "wuling", "Tank": "tank", "Denza": "denza",
+    "Lynk & Co": "lynk-and-co", "Xiaomi": "xiaomi",
+    "Polestar": "polestar", "Volvo": "volvo", "Skoda": "skoda",
+    "Rolls-Royce": "rolls-royce", "Bentley": "bentley",
+    "Ferrari": "ferrari", "Lamborghini": "lamborghini",
+    "Maserati": "maserati", "Aston Martin": "aston-martin",
+    "Land Rover": "land-rover", "Jaguar": "jaguar",
+    "Jeep": "jeep", "Dodge": "dodge", "Lincoln": "lincoln",
+    "Alfa Romeo": "alfa-romeo", "Mini": "mini", "MINI": "mini",
+    "Infiniti": "infiniti", "Acura": "acura",
+    "GAC Trumpchi": "gac-trumpchi", "Geely Galaxy": "geely-auto",
+    "Ora": "ora", "GWM Ora": "ora",
+    "Jetour": "jetour", "Exeed": "exeed",
+    "Deepal": "deepal", "Onvo": "onvo",
+    "Roewe": "roewe", "Baojun": "baojun",
+    "Dongfeng": "dongfeng", "JAC": "jac", "JMC": "jmc",
+    "Foton": "foton", "Bestune": "bestune",
 }
 
-CITIES = {
-    "Beijing":    "bj",
-    "Shanghai":   "sh",
-    "Guangzhou":  "gz",
-    "Shenzhen":   "sz",
-    "Chengdu":    "cd",
-    "Hangzhou":   "hz",
-}
+
+def brand_slug(mark: str) -> str:
+    return BRAND_SLUG.get(mark) or mark.lower().replace(
+        "&", "and").replace(" ", "-").replace("_", "-")
 
 
-def build_listing_url(city_slug: str, path_suffix: str = "") -> str:
-    """City homepage or city/brand subpage. Pagination (`/o2/`) triggers captcha;
-    iterate brand-by-brand instead for breadth.
+def extract_cards(page) -> list[dict]:
+    """Extract car card data from a rendered listing page.
+
+    en.guazi.com renders cards as React components. We extract from the
+    DOM rather than intercepting API calls — more resilient to API auth
+    changes while the public DOM stays stable.
     """
-    path_suffix = path_suffix.strip("/")
-    if path_suffix:
-        return f"{BASE_URL}/{city_slug}/{path_suffix}/"
-    return f"{BASE_URL}/{city_slug}/"
+    cards = page.evaluate(r"""() => {
+        const results = [];
+        // Strategy 1: find car card links with structured alt text
+        // Alt pattern: "Used {Brand} {Model} {Year} {Trim}"
+        // They appear in <img> inside <a> card containers
+        const imgs = document.querySelectorAll('img[alt^="Used "]');
+        for (const img of imgs) {
+            const alt = img.alt;
+            const card = img.closest('a') || img.closest('[data-testid]') || img.parentElement?.parentElement;
+            if (!card) continue;
+            const href = card.getAttribute('href') || '';
+            // Extract clueId from href: /used-cars/detail/123456/
+            const idMatch = href.match(/\/detail\/(\d+)/);
+            if (!idMatch) continue;
+            const clueId = idMatch[1];
+            // Parse alt: "Used BMW 5 Series 2018 530Li Leading Edition Luxury Package"
+            // Price from card text
+            const priceEl = card.querySelector('[class*="price"]') || card;
+            const priceText = priceEl.innerText || '';
+            const priceMatch = priceText.match(/\$\s*([\d,]+)/);
+            const price = priceMatch ? parseInt(priceMatch[1].replace(/,/g, ''), 10) : null;
+            // Mileage
+            const mileMatch = priceText.match(/([\d,.]+)\s*(?:km|mi)/i);
+            const mileage = mileMatch ? parseFloat(mileMatch[1].replace(/,/g, '')) : null;
+            // Year from alt
+            const yearMatch = alt.match(/(\d{4})/);
+            const year = yearMatch ? parseInt(yearMatch[1], 10) : null;
+            // Photo URL
+            const photoSrc = img.src || img.dataset?.src || '';
+
+            results.push({
+                clueId, alt, href, price, mileage, year, photoSrc
+            });
+        }
+
+        // Strategy 2: if strategy 1 found nothing, try generic card containers
+        if (results.length === 0) {
+            const cards = document.querySelectorAll('[class*="car-card"], [class*="vehicle_card"], [class*="carItem"]');
+            for (const card of cards) {
+                const link = card.querySelector('a[href*="/detail/"]');
+                if (!link) continue;
+                const href = link.getAttribute('href') || '';
+                const idMatch = href.match(/\/detail\/(\d+)/);
+                if (!idMatch) continue;
+                const text = card.innerText || '';
+                results.push({
+                    clueId: idMatch[1],
+                    alt: '',
+                    href,
+                    price: null,
+                    mileage: null,
+                    year: null,
+                    photoSrc: '',
+                    rawText: text.substring(0, 500)
+                });
+            }
+        }
+
+        // Dedupe by clueId
+        const seen = new Set();
+        return results.filter(r => {
+            if (seen.has(r.clueId)) return false;
+            seen.add(r.clueId);
+            return true;
+        });
+    }""")
+    return cards
 
 
-BRAND_HREF_RE = re.compile(r'href="/([a-z]+)/([a-z0-9_-]+)/?"')
-
-
-def discover_brand_paths(city_slug: str, homepage_html: str) -> list[str]:
-    """Pull all /{city}/{brand}/ URLs from the city homepage navigation."""
-    brands: set[str] = set()
-    for city_part, brand_part in BRAND_HREF_RE.findall(homepage_html):
-        if city_part != city_slug:
-            continue
-        if brand_part in {"buy", "sell", "trade", "tag", "list", "search",
-                           "rank", "sortvalue", "ranklist", "huishou"}:
-            continue
-        brands.add(brand_part)
-    return sorted(brands)
-
-
-HREF_RE  = re.compile(r'href="(/car-detail/c(\d+)\.html)"')
-ALT_RE   = re.compile(r'alt="([^"]+)"')
-PHOTO_RE = re.compile(r'src="(https?://[^"?]+)')
-DESC_RE  = re.compile(r'<div class="car-item-info-desc">(.+?)</div>', re.DOTALL)
-TAGS_RE  = re.compile(r'<div class="car-item-info-tag">(.+?)</div>\s*<div', re.DOTALL)
-PRICE_RE = re.compile(r'<span class="car-item-info-price-value">([\d.]+)</span>')
-
-
-def extract_cards(html: str) -> list[dict]:
-    """Split HTML on `<div class="car-item">` and parse each block individually."""
-    chunks = html.split('<div class="car-item ">')[1:]
-    out: list[dict] = []
-    for chunk in chunks:
-        # Cards are ~2KB; cap defensively so regex stays fast
-        block = chunk[:3000]
-
-        href = HREF_RE.search(block);    alt = ALT_RE.search(block)
-        photo = PHOTO_RE.search(block);  desc = DESC_RE.search(block)
-        tags_m = TAGS_RE.search(block);  price = PRICE_RE.search(block)
-        if not (href and alt and desc and price):
-            continue
-
-        # Desc contains HTML comments `<!-- -->` between segments — strip them
-        desc_text = re.sub(r"<[^>]+>", "", desc.group(1))
-        d_parts = [p.strip() for p in desc_text.split("|") if p.strip()]
-        year = mileage_km = city = None
-        for p in d_parts:
-            ym = re.search(r"(\d{4})\s*年", p)
-            if ym:
-                year = int(ym.group(1)); continue
-            km = re.search(r"([\d.]+)\s*万\s*公里", p)
-            if km:
-                mileage_km = int(float(km.group(1)) * 10_000); continue
-            if re.search(r"[一-龥]", p):
-                city = p
-        tags = re.findall(r"<span[^>]*>([^<]+)</span>",
-                          tags_m.group(1) if tags_m else "")
-        out.append({
-            "url": BASE_URL + href.group(1),
-            "clue_id": href.group(2),
-            "title": alt.group(1),
-            "thumb_url": photo.group(1) if photo else None,
-            "year": year,
-            "mileage_km": mileage_km,
-            "city": city,
-            "tags": tags,
-            "price_cny": int(float(price.group(1)) * 10_000),
-        })
-    return out
-
-
-def card_passes_filters(card: dict, min_year: int, max_mileage_km: int,
-                        min_price_cny: int) -> tuple[bool, str]:
-    if not card.get("year") or card["year"] < min_year:
-        return False, f"year {card.get('year')} < {min_year}"
-    if not card.get("mileage_km") or card["mileage_km"] > max_mileage_km:
-        return False, f"mileage {card.get('mileage_km')} > {max_mileage_km}"
-    if not card.get("price_cny") or card["price_cny"] < min_price_cny:
-        return False, f"price {card.get('price_cny')} < {min_price_cny}"
-    return True, ""
-
-
-def upsert_pending(card: dict) -> bool:
-    rec = {
-        "source": SOURCE,
-        "source_id": str(card["clue_id"]),
-        "metadata": {
-            "url":       card["url"],
-            "title":     card["title"],
-            "thumb_url": card.get("thumb_url"),
-            "year":      card.get("year"),
-            "mileage_km": card.get("mileage_km"),
-            "price_cny": card.get("price_cny"),
-            "city":      card.get("city"),
-            "tags":      card.get("tags"),
-        },
-        "found_at": DB.now_iso(),
-    }
-    return DB.upsert_pending(rec)
-
-
-_PW = None
-_BROWSER = None
-_CTX = None
-_PAGE = None
-_REQUESTS_THIS_SESSION = 0
-
-
-def _start_session():
-    """Start (or restart) a fresh browser context."""
-    global _PW, _BROWSER, _CTX, _PAGE, _REQUESTS_THIS_SESSION
-    if _BROWSER:
-        try: _BROWSER.close()
-        except Exception: pass
-        _BROWSER = _CTX = _PAGE = None
-    if _PW is None:
-        _PW = sync_playwright().start()
-    _BROWSER = _PW.chromium.launch(
-        headless=True,
-        args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
-    )
-    _CTX = _BROWSER.new_context(
-        user_agent=UA, locale="zh-CN", ignore_https_errors=True,
-        viewport={"width": 1366, "height": 900},
-    )
-    _CTX.add_init_script(
-        "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-    )
-    _PAGE = _CTX.new_page()
-    _REQUESTS_THIS_SESSION = 0
-
-
-def _ensure_page():
-    if _PAGE is None:
-        _start_session()
-    return _PAGE
-
-
-OXY_USER = os.environ.get("OXY_USER", "")
-OXY_PASS = os.environ.get("OXY_PASS", "")
-OXY_URL = "https://realtime.oxylabs.io/v1/queries"
-
-
-def _oxylabs_fetch(url: str) -> str | None:
-    """Fetch a guazi page via Oxylabs (China geo).
-    GitHub runners are US-based and guazi 301-redirects them to en.guazi.com,
-    so direct fetch / Playwright both return the English placeholder.
-    """
-    payload = {
-        "source": "universal", "url": url,
-        "geo_location": "China", "locale": "zh-CN", "render": "html",
-    }
-    for attempt in range(3):
+def collect_brand(page, mark: str, slug: str, max_pages: int,
+                  min_year: int, min_price: int,
+                  max_mileage_km: int) -> list[dict]:
+    """Collect cars for one brand across multiple pages."""
+    collected = []
+    for pg in range(1, max_pages + 1):
+        url = f"{BASE_URL}/used-cars/{slug}/"
+        if pg > 1:
+            url = f"{BASE_URL}/used-cars/{slug}/page{pg}/"
         try:
-            r = requests.post(OXY_URL, auth=(OXY_USER, OXY_PASS),
-                              json=payload, timeout=120)
-            if r.status_code != 200:
-                time.sleep(2 ** attempt); continue
-            results = r.json().get("results") or []
-            if not results:
-                time.sleep(2 ** attempt); continue
-            content = results[0].get("content") or ""
-            if len(content) < 5000:
-                time.sleep(2 ** attempt); continue
-            head = content[:3000].lower()
-            if ("captcha" in head or "<title>验证</title>" in content[:3000]
-                    or "请完成下方验证" in content[:3000]):
-                time.sleep(2 ** attempt); continue
-            return content
-        except Exception:
-            time.sleep(2 ** attempt)
-    return None
+            page.goto(url, wait_until="networkidle", timeout=30_000)
+            page.wait_for_timeout(2000)
+            # Scroll down to trigger lazy-loading
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1500)
+        except Exception as e:
+            print(f"    page {pg} load failed: {e}", flush=True)
+            break
+
+        cards = extract_cards(page)
+        if not cards:
+            break
+
+        for c in cards:
+            year = c.get("year") or 0
+            price = c.get("price") or 0
+            mileage = c.get("mileage") or 0
+            if min_year and year < min_year:
+                continue
+            if min_price and price < min_price:
+                continue
+            if max_mileage_km and mileage > max_mileage_km:
+                continue
+            collected.append({
+                "source_id": c["clueId"],
+                "url": f"{BASE_URL}{c['href']}" if c["href"].startswith("/") else c["href"],
+                "mark": mark,
+                "alt": c.get("alt", ""),
+                "price_usd": price,
+                "mileage_km": mileage,
+                "year": year,
+                "photo": c.get("photoSrc", ""),
+            })
+
+        if len(cards) < 10:
+            break
+
+    return collected
 
 
-def fetch_html(url: str) -> str | None:
-    """Route through Oxylabs when credentials present, else fall back to Playwright
-    (useful for local dev from a CN-resolvable network)."""
-    if OXY_USER and OXY_PASS:
-        return _oxylabs_fetch(url)
-    global _REQUESTS_THIS_SESSION
-    page = _ensure_page()
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-        page.wait_for_timeout(900)
-        _REQUESTS_THIS_SESSION += 1
-        if "captcha" in page.url:
-            print(f"    ⚠ captcha hit after {_REQUESTS_THIS_SESSION} reqs — restart")
-            _start_session()
-            return None
-        html = page.content()
-        if len(html) < 5000:
-            return None
-        return html
-    except Exception:
-        return None
+def get_brands_to_scrape() -> list[tuple[str, str]]:
+    """Fetch brands from our DB that have known slugs."""
+    r = DB._pg_request("GET", "brands?select=name&order=name")
+    if r.status_code != 200:
+        return list(BRAND_SLUG.items())
+    brands = r.json()
+    result = []
+    seen = set()
+    for b in brands:
+        name = b["name"]
+        slug = brand_slug(name)
+        if slug not in seen:
+            result.append((name, slug))
+            seen.add(slug)
+    return result
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cities", type=str, default=",".join(CITIES.keys()))
-    ap.add_argument("--pages-per-city", type=int, default=20)
-    ap.add_argument("--min-year", type=int, default=2020)
-    ap.add_argument("--max-mileage-km", type=int, default=100_000)
-    ap.add_argument("--min-price-cny", type=int, default=5_000)
-    ap.add_argument("--limit", type=int, default=10_000)
+    ap.add_argument("--brands", default="",
+                    help="CSV of brand names (empty = all from DB)")
+    ap.add_argument("--max-pages", type=int, default=10)
+    ap.add_argument("--min-year", type=int, default=2018)
+    ap.add_argument("--min-price-usd", type=int, default=2000)
+    ap.add_argument("--max-mileage-km", type=int, default=150000)
+    ap.add_argument("--limit", type=int, default=15000)
     args = ap.parse_args()
 
-    if not DB.USE_POSTGRES:
-        sys.exit("Need Postgres")
+    if args.brands:
+        brands = [(b.strip(), brand_slug(b.strip()))
+                   for b in args.brands.split(",") if b.strip()]
+    else:
+        brands = get_brands_to_scrape()
 
-    cities = [c.strip() for c in args.cities.split(",") if c.strip()]
-    invalid = [c for c in cities if c not in CITIES]
-    if invalid:
-        sys.exit(f"Unknown: {invalid}. Available: {list(CITIES.keys())}")
+    print(f"Collecting from en.guazi.com: {len(brands)} brands, "
+          f"max {args.max_pages} pages/brand, "
+          f"year≥{args.min_year}, price≥${args.min_price_usd}, "
+          f"mileage≤{args.max_mileage_km}km", flush=True)
 
-    print(f"Collecting guazi: {len(cities)} cities × ≤{args.pages_per_city} pages")
-    print(f"  filters: year≥{args.min_year}, mileage≤{args.max_mileage_km:,}km, "
-          f"price≥¥{args.min_price_cny:,}")
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage",
+                  "--disable-blink-features=AutomationControlled"])
+        ctx = browser.new_context(
+            user_agent=UA,
+            viewport={"width": 1366, "height": 2000},
+            locale="en-US",
+        )
+        ctx.add_init_script(
+            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
+        )
+        page = ctx.new_page()
 
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+        total_saved = 0
+        for i, (mark, slug) in enumerate(brands, 1):
+            if total_saved >= args.limit:
+                break
+            cars = collect_brand(
+                page, mark, slug, args.max_pages,
+                args.min_year, args.min_price_usd,
+                args.max_mileage_km,
+            )
+            saved = 0
+            for car in cars:
+                if total_saved >= args.limit:
+                    break
+                meta = {
+                    "url": car["url"],
+                    "mark": car["mark"],
+                    "alt": car["alt"],
+                    "price_usd": car["price_usd"],
+                    "mileage_km": car["mileage_km"],
+                    "year": car["year"],
+                }
+                ok = DB.upsert_pending({
+                    "source": SOURCE,
+                    "source_id": car["source_id"],
+                    "meta": json.dumps(meta, ensure_ascii=False),
+                })
+                if ok:
+                    saved += 1
+                    total_saved += 1
+            if cars:
+                print(f"  [{i}/{len(brands)}] {mark:25} → {len(cars)} found, "
+                      f"{saved} upserted (total {total_saved})", flush=True)
 
-    saved = 0
-    skipped = 0
-    started = time.time()
-    # Parallel fetch over Oxylabs: 8 in-flight requests per city.
-    WORKERS = 8 if (OXY_USER and OXY_PASS) else 1
+        browser.close()
 
-    for city in cities:
-        slug = CITIES[city]
-        print(f"\n[{city}] /{slug}/")
-
-        homepage = fetch_html(build_listing_url(slug))
-        if not homepage:
-            print(f"  city homepage empty — skip")
-            continue
-        brand_paths = discover_brand_paths(slug, homepage)
-        print(f"  discovered {len(brand_paths)} brand subpages, "
-              f"fetching {WORKERS}-way parallel")
-
-        seen: set[str] = set()
-        # Process homepage cards first
-        for c in extract_cards(homepage):
-            cid = c["clue_id"]
-            if cid in seen: continue
-            seen.add(cid)
-            ok, _ = card_passes_filters(
-                c, args.min_year, args.max_mileage_km, args.min_price_cny)
-            if not ok:
-                skipped += 1; continue
-            if upsert_pending(c):
-                saved += 1
-
-        # Fetch all brand subpages in parallel
-        urls = [(p, build_listing_url(slug, p)) for p in brand_paths]
-        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-            futures = {pool.submit(fetch_html, u): p for p, u in urls}
-            for fut in as_completed(futures):
-                if saved >= args.limit: break
-                path = futures[fut]
-                try: html = fut.result()
-                except Exception: html = None
-                if not html: continue
-                cards = extract_cards(html)
-                page_saved = 0
-                for c in cards:
-                    cid = c["clue_id"]
-                    if cid in seen: continue
-                    seen.add(cid)
-                    ok, _ = card_passes_filters(
-                        c, args.min_year, args.max_mileage_km, args.min_price_cny)
-                    if not ok:
-                        skipped += 1; continue
-                    if upsert_pending(c):
-                        saved += 1; page_saved += 1
-                elapsed = int(time.time() - started)
-                print(f"  [{path[:25]:25}] {len(cards):>3} cards → {page_saved:>3} kept"
-                      f" (city {len(seen)}, all {saved}, {elapsed}s)")
-
-    elapsed = int(time.time() - started)
-    print(f"\nDone in {elapsed}s. Upserted: {saved}, filtered: {skipped}")
+    print(f"\nDone. Total upserted: {total_saved}", flush=True)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except SystemExit:
-        raise
-    except Exception:
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    main()

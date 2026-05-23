@@ -1,40 +1,41 @@
-name: Scrape guazi
+name: Scrape guazi (en.guazi.com)
 
 on:
   schedule:
     # Every 2 hours at :30 (offset from encar :00 and che168 :15).
-    # Typical run 15-35 min, fits comfortably in a 2h slot.
     - cron: '30 */2 * * *'
   workflow_dispatch:
     inputs:
-      cities:
+      brands:
+        description: 'CSV of brand names to scrape (empty = all from DB)'
         required: false
-        default: 'Beijing,Shanghai,Guangzhou,Shenzhen,Chengdu,Hangzhou'
-      pages_per_city:
+        default: ''
+      max_pages:
+        description: 'Max listing pages per brand'
         required: false
-        default: '20'
+        default: '10'
       min_year:
         required: false
-        default: '2020'
+        default: '2018'
       max_mileage_km:
         required: false
-        default: '100000'
-      min_price_cny:
+        default: '150000'
+      min_price_usd:
         required: false
-        default: '5000'
+        default: '2000'
       collect_limit:
         required: false
         default: '15000'
       scrape_limit:
         required: false
-        default: '5000'
-      workers:
-        required: false
-        default: '8'
+        default: '1000'
 
 concurrency:
   group: scrape-guazi
   cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   scrape:
@@ -46,31 +47,28 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install deps + playwright
-        # collect_guazi.py uses playwright to bypass guazi's bot detection
-        # on the listing pages; scrape_guazi.py uses direct HTTP.
         run: |
           pip install -r requirements.txt
           pip install playwright
           python -m playwright install chromium --with-deps
 
-      - name: Collect listings (6 cities + filters)
+      - name: Collect listings from en.guazi.com
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           python collect_guazi.py \
-            --cities         "${{ inputs.cities         || 'Beijing,Shanghai,Guangzhou,Shenzhen,Chengdu,Hangzhou' }}" \
-            --pages-per-city ${{ inputs.pages_per_city || 20 }} \
-            --min-year       ${{ inputs.min_year       || 2020 }} \
-            --max-mileage-km ${{ inputs.max_mileage_km || 100000 }} \
-            --min-price-cny  ${{ inputs.min_price_cny  || 5000 }} \
+            --brands         "${{ inputs.brands || '' }}" \
+            --max-pages      ${{ inputs.max_pages      || 10 }} \
+            --min-year       ${{ inputs.min_year       || 2018 }} \
+            --max-mileage-km ${{ inputs.max_mileage_km || 150000 }} \
+            --min-price-usd  ${{ inputs.min_price_usd  || 2000 }} \
             --limit          ${{ inputs.collect_limit  || 15000 }}
 
-      - name: Scrape detail pages (direct HTTP, parallel)
+      - name: Scrape detail pages (Playwright)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           python scrape_guazi.py \
-            --limit   ${{ inputs.scrape_limit || 5000 }} \
-            --workers ${{ inputs.workers      || 8 }}
+            --limit   ${{ inputs.scrape_limit || 1000 }}
