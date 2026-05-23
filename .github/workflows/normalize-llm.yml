@@ -32,10 +32,15 @@ on:
         description: 'OpenRouter model id (default moonshotai/kimi-k2.6)'
         required: false
         default: ''
-  schedule:
-    # Hourly at :50 — runs after the encar :00 / che168 :15 / guazi :30 /
-    # autocango :45 scrape windows, so it sees rows fresh from this hour.
-    - cron: '50 * * * *'
+  # Hourly cron paused. The LLM normalizer was mis-classifying some
+  # Chinese listings — instead of extracting the model name it stored
+  # year-version fragments like "2023款" / "2025款" as the canonical
+  # model and promoted them into the `models` table via FK. ~33
+  # garbage rows in `models` came from this. Re-enable once the prompt /
+  # post-validation rejects `^\d{4}款$` before INSERT. Manual
+  # workflow_dispatch stays usable.
+  # schedule:
+  #   - cron: '50 * * * *'
 
 concurrency:
   group: normalize-llm

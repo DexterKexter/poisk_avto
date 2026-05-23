@@ -231,6 +231,46 @@ def pg_count(table: str, where: str = "") -> int:
     return 0
 
 
+def pg_sync_log_start(source: str, run_url: str | None = None) -> int | None:
+    """Insert a new sync_log row; return its id so the finish call can update it."""
+    r = _pg_request(
+        "POST", "sync_log",
+        headers={"Prefer": "return=representation"},
+        json={"source": source, "run_url": run_url},
+    )
+    if r.status_code not in (200, 201):
+        print(f"  sync_log start FAIL {r.status_code}: {r.text[:200]}")
+        return None
+    try:
+        return int(r.json()[0]["id"])
+    except (KeyError, IndexError, ValueError, TypeError):
+        return None
+
+
+def pg_sync_log_finish(run_id: int, added: int = 0, failed: int = 0,
+                       updated: int = 0, error_message: str | None = None) -> bool:
+    """Mark a sync_log row as finished. Truncates error_message at 4 KB."""
+    if not run_id:
+        return False
+    payload: dict = {
+        "finished_at": now_iso(),
+        "added": added,
+        "updated": updated,
+        "failed": failed,
+    }
+    if error_message:
+        payload["error_message"] = error_message[:4000]
+    r = _pg_request(
+        "PATCH", f"sync_log?id=eq.{run_id}",
+        headers={"Prefer": "return=minimal"},
+        json=payload,
+    )
+    if r.status_code not in (200, 204):
+        print(f"  sync_log finish FAIL {r.status_code}: {r.text[:200]}")
+        return False
+    return True
+
+
 # ---------- SQLite fallback (mirrors Postgres schema) ----------
 
 SQLITE_SCHEMA = """
@@ -262,7 +302,9 @@ CREATE TABLE IF NOT EXISTS cars (
     reg_city_original TEXT, reg_city TEXT,
     reg_date TEXT,
 
-    owners_count INTEGER, maintenance TEXT, interior_color_original TEXT,
+    owners_count INTEGER, has_accident_record INTEGER,
+    insurance_claims_count INTEGER, battery_health_pct REAL,
+    maintenance TEXT, interior_color_original TEXT,
     description TEXT,
     images TEXT, image_count INTEGER,
 
@@ -326,6 +368,9 @@ def sqlite_conn() -> sqlite3.Connection:
             "ALTER TABLE cars ADD COLUMN vin TEXT",
             "ALTER TABLE cars ADD COLUMN published_at TEXT",
             "ALTER TABLE cars ADD COLUMN listing_updated_at TEXT",
+            "ALTER TABLE cars ADD COLUMN has_accident_record INTEGER",
+            "ALTER TABLE cars ADD COLUMN insurance_claims_count INTEGER",
+            "ALTER TABLE cars ADD COLUMN battery_health_pct REAL",
         ):
             try:
                 _sqlite_conn.execute(stmt)
@@ -553,6 +598,24 @@ def count_pending(source: str = "") -> int:
     if source:
         return sqlite_count("pending_ids", "source = ?", (source,))
     return sqlite_count("pending_ids")
+
+
+def sync_log_start(source: str, run_url: str | None = None) -> int | None:
+    """Open a run-log row. No-op (returns None) on SQLite — local dev doesn't
+    monitor runs the way the admin dashboard does."""
+    if USE_POSTGRES:
+        return pg_sync_log_start(source, run_url)
+    return None
+
+
+def sync_log_finish(run_id: int | None, added: int = 0, failed: int = 0,
+                    updated: int = 0, error_message: str | None = None) -> bool:
+    if run_id is None:
+        return False
+    if USE_POSTGRES:
+        return pg_sync_log_finish(run_id, added=added, failed=failed,
+                                  updated=updated, error_message=error_message)
+    return False
 
 
 def backend_name() -> str:

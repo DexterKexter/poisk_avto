@@ -169,7 +169,10 @@ SPEC_FIELDS = {
     "transfers_text":   r"过户次数[\s\S]{0,80}?(\d+)\s*次",
     "color":            r"车身颜色[\s\S]{0,120}?([一-龥]{1,8}色)",
     "drive_type_zh":    r"驱动方式[\s\S]{0,120}?([一-龥]{2,12})",
-    "transmission_zh":  r"变速箱[\s\S]{0,120}?([一-龥A-Za-z]{1,10})",
+    # che168 detail page exposes transmission in a combined "挡位 / 排量" cell
+    # like `<p>挡位 / 排量</p><h4>自动 / 2L</h4>`. The legacy 变速箱 label
+    # doesn't exist on the page — keep the new pattern only.
+    "transmission_zh":  r"挡位\s*/\s*排量[\s\S]{0,120}?<h4>([一-龥A-Za-z]{1,8})\s*/\s*[\d.]+\s*[LT]",
     "fuel_zh":          r"燃料类型[\s\S]{0,120}?([一-龥]{1,8})",
     "emission":         r"排放标准[\s\S]{0,120}?(国\s*[一-龥VI]{1,5})",
     "displacement":     r"排量[\s\S]{0,80}?([\d.]+\s*[TL])",
@@ -297,17 +300,49 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
     series_en = series_zh.replace("系", " Series").replace("级", " Class").strip()
     series_en = translate_series(series_en) or series_en
 
-    # Drive / transmission / fuel — translate. Regex on che168 detail page
-    # can pull description fragments ("运转良好" etc) when 变速箱 appears in
-    # text outside the spec block. Validate against the canonical map.
+    # Drive / transmission / fuel — translate. che168 detail page can leak
+    # description fragments into raw matches; validate against canonical maps.
     drive_zh = specs.get("drive_type_zh", "")
     drive_zh = drive_zh if drive_zh in DRIVE_MAP else ""
     trans_zh = specs.get("transmission_zh", "")
     trans_zh = trans_zh if trans_zh in TRANSMISSION_MAP else ""
     fuel_zh = specs.get("fuel_zh", "")
     fuel_zh = fuel_zh if fuel_zh in FUEL_MAP else ""
+    # Fuel inference: 燃料类型 is only printed for EVs/PHEVs on che168.
+    # For ICE the "挡位 / 排量" cell holds something like "自动 / 2L" — any
+    # non-zero displacement → Petrol (Diesel is rare and never labelled here).
+    if not fuel_zh:
+        disp_raw = specs.get("displacement", "")
+        disp_match = re.search(r"([\d.]+)", disp_raw)
+        if disp_match:
+            try:
+                if float(disp_match.group(1)) > 0:
+                    fuel_zh = "汽油"
+                else:
+                    fuel_zh = "纯电动"
+            except ValueError:
+                pass
 
     transfers = parse_int(specs.get("transfers_text"))
+
+    # Flat columns: derived from raw badges/specs
+    battery_health_pct: float | None = None
+    bh_raw = specs.get("battery_health") or ""
+    bh_digits = re.sub(r"[^0-9.]", "", bh_raw)
+    if bh_digits:
+        try:
+            battery_health_pct = float(bh_digits)
+        except ValueError:
+            battery_health_pct = None
+
+    # Displacement — regex captures "2.0T" / "1.5L"; store numeric liters in
+    # the main column so it matches autocango/encar (raw string stays in
+    # source_data for traceability).
+    disp_raw = specs.get("displacement", "")
+    disp_match = re.search(r"([\d.]+)", disp_raw)
+    displacement_l = float(disp_match.group(1)) if disp_match else None
+    if displacement_l == 0:
+        displacement_l = None
 
     detail_url = (meta.get("url")
                   or f"{BASE_URL}/dealer/{meta.get('dealerid')}/{sku_id}.html")
@@ -367,11 +402,15 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
         "transmission_type": tr(trans_zh, TRANSMISSION_MAP) or None,
         "drive_type": tr(drive_zh, DRIVE_MAP) or None,
         "drive_original": drive_zh or None,
+        "displacement": displacement_l,
 
         "city_original": city_zh or None,
         "city": city_name or None,
 
         "vin": vin,
+
+        "owners_count": transfers,
+        "battery_health_pct": battery_health_pct,
 
         "images": photos,
         "image_count": len(photos),
@@ -498,42 +537,52 @@ def main() -> None:
     if not DB.USE_POSTGRES:
         sys.exit("Need Postgres")
 
-    pending = fetch_pending_rows(args.limit)
-    if not pending:
-        print("No pending IDs"); return
-    print(f"Scraping {len(pending)} che168 cards with {args.workers} workers"
-          f" (batches of 20 per playwright session)")
-
-    BATCH_SIZE = 20
-    batches = [pending[i:i+BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)]
-
+    # Open a sync_log row so the admin dashboard can show this run.
+    run_id = DB.sync_log_start(SOURCE, os.environ.get("GITHUB_RUN_URL"))
     ok_count = 0
     fail_count = 0
-    started = time.time()
-    processed = 0
+    error_message: str | None = None
+    try:
+        pending = fetch_pending_rows(args.limit)
+        if not pending:
+            print("No pending IDs")
+            return
+        print(f"Scraping {len(pending)} che168 cards with {args.workers} workers"
+              f" (batches of 20 per playwright session)")
 
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(scrape_batch, b): b for b in batches}
-        for fut in as_completed(futs):
-            try:
-                results = fut.result()
-            except Exception:
-                traceback.print_exc()
-                fail_count += len(futs[fut])
-                continue
-            for sku_id, ok, err in results:
-                processed += 1
-                if ok:
-                    ok_count += 1
-                else:
-                    DB.mark_failed(SOURCE, sku_id)
-                    fail_count += 1
-            elapsed = int(time.time() - started)
-            print(f"  batch done: {processed}/{len(pending)} "
-                  f"(ok={ok_count}, fail={fail_count}, {elapsed}s)")
+        BATCH_SIZE = 20
+        batches = [pending[i:i+BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)]
 
-    elapsed = int(time.time() - started)
-    print(f"\nDone in {elapsed}s. OK: {ok_count}, FAIL: {fail_count}")
+        started = time.time()
+        processed = 0
+
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futs = {ex.submit(scrape_batch, b): b for b in batches}
+            for fut in as_completed(futs):
+                try:
+                    results = fut.result()
+                except Exception:
+                    traceback.print_exc()
+                    fail_count += len(futs[fut])
+                    continue
+                for sku_id, ok, err in results:
+                    processed += 1
+                    if ok:
+                        ok_count += 1
+                    else:
+                        DB.mark_failed(SOURCE, sku_id)
+                        fail_count += 1
+                elapsed = int(time.time() - started)
+                print(f"  batch done: {processed}/{len(pending)} "
+                      f"(ok={ok_count}, fail={fail_count}, {elapsed}s)")
+
+        elapsed = int(time.time() - started)
+        print(f"\nDone in {elapsed}s. OK: {ok_count}, FAIL: {fail_count}")
+    except Exception as e:
+        error_message = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        raise
+    finally:
+        DB.sync_log_finish(run_id, added=ok_count, failed=fail_count, error_message=error_message)
 
 
 if __name__ == "__main__":
