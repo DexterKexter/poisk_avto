@@ -162,11 +162,17 @@ def collect_brand(page, mark: str, slug: str, max_pages: int,
         if pg > 1:
             url = f"{BASE_URL}/used-cars/{slug}/page{pg}/"
         try:
-            page.goto(url, wait_until="networkidle", timeout=30_000)
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            # Wait for car cards to render (RSC loads them async after SSR shell)
+            try:
+                page.wait_for_selector(
+                    'img[alt^="Used "], a[href*="/detail/"], [class*="vehicle_card"]',
+                    timeout=15_000)
+            except Exception:
+                pass  # will hit the debug branch below
             page.wait_for_timeout(2000)
-            # Scroll down to trigger lazy-loading
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(2000)
         except Exception as e:
             print(f"    page {pg} load failed: {e}", flush=True)
             break
