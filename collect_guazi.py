@@ -155,28 +155,102 @@ def extract_cards(page) -> list[dict]:
 def collect_brand(page, mark: str, slug: str, max_pages: int,
                   min_year: int, min_price: int,
                   max_mileage_km: int) -> list[dict]:
-    """Collect cars for one brand across multiple pages."""
+    """Collect cars for one brand across multiple pages.
+
+    en.guazi.com loads listing data via internal API (RSC streaming).
+    We intercept API responses via Playwright's response handler rather
+    than parsing DOM — the DOM often stays empty without auth.
+    """
     collected = []
     for pg in range(1, max_pages + 1):
         url = f"{BASE_URL}/used-cars/{slug}/"
         if pg > 1:
             url = f"{BASE_URL}/used-cars/{slug}/page{pg}/"
-        try:
-            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            # Wait for car cards to render (RSC loads them async after SSR shell)
+
+        api_cars: list[dict] = []
+
+        def _on_response(resp):
+            """Intercept JSON API responses that contain car listings."""
             try:
-                page.wait_for_selector(
-                    'img[alt^="Used "], a[href*="/detail/"], [class*="vehicle_card"]',
-                    timeout=15_000)
+                ct = resp.headers.get("content-type", "")
+                if "json" not in ct and "text/x-component" not in ct:
+                    return
+                body = resp.text()
+                if not body or len(body) < 50:
+                    return
+                # RSC streaming sends multiple JSON lines — try each
+                for line in body.split("\n"):
+                    line = line.strip()
+                    if not line or not (line.startswith("{") or line.startswith("[")):
+                        continue
+                    try:
+                        import json as _json
+                        obj = _json.loads(line)
+                    except Exception:
+                        continue
+                    # Look for car list data
+                    items = None
+                    if isinstance(obj, dict):
+                        data = obj.get("data") or obj
+                        if isinstance(data, dict):
+                            items = data.get("list") or data.get("items") or data.get("records")
+                    elif isinstance(obj, list):
+                        items = obj
+                    if items and isinstance(items, list) and len(items) > 0:
+                        first = items[0]
+                        if isinstance(first, dict) and any(
+                            k in first for k in ("clueId", "productId", "carId",
+                                                  "brandName", "modelName", "price")):
+                            api_cars.extend(items)
             except Exception:
-                pass  # will hit the debug branch below
-            page.wait_for_timeout(2000)
+                pass
+
+        page.on("response", _on_response)
+        try:
+            page.goto(url, wait_until="networkidle", timeout=45_000)
+            page.wait_for_timeout(3000)
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             page.wait_for_timeout(2000)
         except Exception as e:
             print(f"    page {pg} load failed: {e}", flush=True)
+            page.remove_listener("response", _on_response)
             break
+        page.remove_listener("response", _on_response)
 
+        # Strategy 1: API-intercepted cars
+        if api_cars:
+            print(f"    page {pg}: intercepted {len(api_cars)} cars from API",
+                  flush=True)
+            for car in api_cars:
+                cid = str(car.get("clueId") or car.get("productId")
+                          or car.get("carId") or car.get("id", ""))
+                if not cid:
+                    continue
+                brand = car.get("brandName") or car.get("brand") or mark
+                model = car.get("modelName") or car.get("model") or car.get("seriesName") or ""
+                year = car.get("year") or car.get("modelYear")
+                price = car.get("price") or car.get("displayPrice")
+                mileage = car.get("mileage") or car.get("kilometer")
+                photo = car.get("coverImage") or car.get("image") or car.get("mainPhoto") or ""
+                detail_url = car.get("detailUrl") or f"/used-cars/detail/{cid}/"
+
+                collected.append({
+                    "source_id": cid,
+                    "url": f"{BASE_URL}{detail_url}" if detail_url.startswith("/") else detail_url,
+                    "mark": brand,
+                    "model": model,
+                    "alt": f"Used {brand} {model} {year or ''}".strip(),
+                    "price_usd": int(price) if price else None,
+                    "mileage_km": int(float(str(mileage).replace(",", ""))) if mileage else None,
+                    "year": int(year) if year else None,
+                    "photo": photo,
+                    "api_data": car,
+                })
+            if len(api_cars) < 10:
+                break
+            continue
+
+        # Strategy 2: DOM extraction (fallback)
         cards = extract_cards(page)
         if not cards:
             debug = page.evaluate("""() => ({
