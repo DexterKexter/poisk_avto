@@ -333,6 +333,48 @@ def parse_dimensions(s: str | None) -> tuple[int | None, int | None, int | None]
     return None, None, None
 
 
+# ---- Brand / Model lookup cache ----
+
+_brand_cache: dict[str, int] = {}
+_model_cache: dict[tuple[int, str], int] = {}
+
+
+def _load_brand_cache() -> None:
+    if _brand_cache:
+        return
+    r = DB._pg_request("GET", "brands?select=id,name,slug")
+    if r.status_code != 200:
+        return
+    for row in r.json():
+        _brand_cache[row["name"].lower()] = row["id"]
+        _brand_cache[row["slug"].lower()] = row["id"]
+
+
+def _load_model_cache() -> None:
+    if _model_cache:
+        return
+    r = DB._pg_request("GET", "models?select=id,brand_id,name,slug")
+    if r.status_code != 200:
+        return
+    for row in r.json():
+        bid = row.get("brand_id")
+        if bid:
+            _model_cache[(bid, row["name"].lower())] = row["id"]
+            _model_cache[(bid, row["slug"].lower())] = row["id"]
+
+
+def lookup_brand_id(brand_name: str) -> int | None:
+    _load_brand_cache()
+    return _brand_cache.get(brand_name.lower())
+
+
+def lookup_model_id(brand_id: int | None, model_name: str) -> int | None:
+    if not brand_id or not model_name:
+        return None
+    _load_model_cache()
+    return _model_cache.get((brand_id, model_name.lower()))
+
+
 SPEC_LINE_MAP = {
     "Mfg. Date": "mfg_date", "Manufacturing Date": "mfg_date",
     "Mfg. Year": "mfg_date", "Mfg Date": "mfg_date",
@@ -453,6 +495,10 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
     # Brand / series / complectation
     slug_brand_series = parsed["brand_series_slug"] if parsed else ""
     brand, series, complectation = extract_brand_series(title, slug_brand_series)
+
+    # Match to brands/models catalog
+    brand_id = lookup_brand_id(brand)
+    model_id = lookup_model_id(brand_id, series)
 
     # Year + manufacturing date
     mfg_raw = specs.get("mfg_date", "")
@@ -626,6 +672,8 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
         "url": detail_url,
         "title": title,
 
+        "brand_id": brand_id,
+        "model_id": model_id,
         "mark_original": None,
         "mark": brand or None,
         "series_original": None,
