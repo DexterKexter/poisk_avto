@@ -146,11 +146,14 @@ def main() -> None:
         rec = {
             "slug": b["slug"],
             "name": b["name"],
-            "logo_url": b.get("logo_url"),
             "source": SOURCE,
             "source_url": b.get("href"),
             "updated_at": DB.now_iso(),
         }
+        # Only set logo_url when we actually scraped one — never overwrite
+        # an existing enriched logo with NULL.
+        if b.get("logo_url"):
+            rec["logo_url"] = b["logo_url"]
         r = DB._pg_request(
             "POST",
             "brands?on_conflict=source,slug",
