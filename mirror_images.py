@@ -45,8 +45,9 @@ BUCKET = "car-images"
 BLOCKED_HOST_SUBSTRINGS = (
     "autoimg.cn",            # che168
     "i1.autocango.com",      # autocango
-    "image-public.guazistatic.com",  # guazi (defensive)
+    "image-public.guazistatic.com",  # guazi CN
     "image-pub.guazistatic.com",
+    "guazistatic-global.com",        # guazi EN (image-oversea + global-image-pub)
 )
 # Per-host referer override — sites check Referer against their own domain
 REFERER_BY_HOST = {
@@ -54,6 +55,7 @@ REFERER_BY_HOST = {
     "i1.autocango.com":              "https://www.autocango.com/",
     "image-public.guazistatic.com":  "https://www.guazi.com/",
     "image-pub.guazistatic.com":     "https://www.guazi.com/",
+    "guazistatic-global.com":        "https://en.guazi.com/",
 }
 PUBLIC_URL = f"{DB.SUPABASE_URL}/storage/v1/object/public/{BUCKET}"
 BASE_DOWNLOAD_HEADERS = {
@@ -184,7 +186,7 @@ def fetch_cars_to_mirror(limit: int | None, source_filter: str | None
     if source_filter:
         params.append(f"source=eq.{source_filter}")
     else:
-        params.append("source=in.(che168,autohome,autocango,guazi)")
+        params.append("source=in.(che168,autohome,autocango,guazi,guazi_en)")
     # Pull in pages of 1000 (PostgREST default ceiling).
     page_size = 1000
     offset = 0
