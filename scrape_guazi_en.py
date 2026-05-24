@@ -114,7 +114,7 @@ EXTRACT_DETAIL_JS = """() => {
     // Title: strip "Grade X" prefix and "Used " prefix
     const h1 = document.querySelector('h1');
     let rawTitle = h1 ? h1.innerText.trim() : '';
-    rawTitle = rawTitle.replace(/^Grade\\s*\\n?\\s*[SABCD]\\s*\\n?/i, '').trim();
+    rawTitle = rawTitle.replace(/^Grade[\\s\\S]*?[SABCD]\\s*/i, '').trim();
     rawTitle = rawTitle.replace(/^Used\\s+/i, '').trim();
     data.title = rawTitle;
 
@@ -137,7 +137,7 @@ EXTRACT_DETAIL_JS = """() => {
 
     // Grade: extract single letter
     let grade = '';
-    const gradeMatch = text.match(/Grade\\s*\\n?\\s*([SABCD])\\b/i);
+    const gradeMatch = text.match(/Grade[\\s\\S]*?([SABCD])\\b/i);
     if (gradeMatch) {
         grade = gradeMatch[1].toUpperCase();
     }
@@ -212,31 +212,26 @@ EXTRACT_DETAIL_JS = """() => {
         }
     }
 
-    // Legacy regex fallback for fields the line parser might miss
-    const pairPatterns = [
-        /Horsepower[^\\n]*?(\\d+[\\d.]*\\s*ps)/i,
-        /(?:Max\\s*)?Power[^\\n]*?(\\d+[\\d.]*\\s*kW)/i,
-    ];
-    const labels = [
-        'horsepower', 'max_power_kw',
-    ];
-    for (let i = 0; i < pairPatterns.length; i++) {
-        const m = text.match(pairPatterns[i]);
-        if (m && !data.specs[labels[i]]) {
-            data.specs[labels[i]] = m[1].trim();
-        }
+    // Regex fallback for horsepower if line parser missed it
+    if (!data.specs['horsepower']) {
+        const hpM = text.match(/Horsepower.*?(\\d+\\.?\\d*)\\s*ps/i);
+        if (hpM) data.specs['horsepower'] = hpM[1] + ' ps';
+    }
+    if (!data.specs['max_power_kw']) {
+        const kwM = text.match(/Power.*?(\\d+\\.?\\d*)\\s*kW/i);
+        if (kwM) data.specs['max_power_kw'] = kwM[1] + ' kW';
     }
 
     // Inspection scores (with denominators)
     data.inspection = {};
     const inspPairs = [
-        /Exterior\\s*(?:Design)?[.:]*\\s*(\\d+)(?:[/\\\\](\\d+))?/i,
-        /Interior\\s*(?:Trim)?[.:]*\\s*(\\d+)(?:[/\\\\](\\d+))?/i,
-        /Configuration\\s*(?:Features)?[.:]*\\s*(\\d+)(?:[/\\\\](\\d+))?/i,
-        /Structural\\s*(?:Components)?[.:]*\\s*(\\d+)(?:[/\\\\](\\d+))?/i,
-        /Reinforcement\\s*(?:Parts)?[.:]*\\s*(\\d+)(?:[/\\\\](\\d+))?/i,
-        /Cockpit\\s*(?:Conditions)?[.:]*\\s*(\\d+)(?:[/\\\\](\\d+))?/i,
-        /New\\s*Energy[.:]*\\s*(\\d+)(?:[/\\\\](\\d+))?/i,
+        /Exterior\\s*(?:Design)?[.:]*\\s*(\\d+)(?:[/](\\d+))?/i,
+        /Interior\\s*(?:Trim)?[.:]*\\s*(\\d+)(?:[/](\\d+))?/i,
+        /Configuration\\s*(?:Features)?[.:]*\\s*(\\d+)(?:[/](\\d+))?/i,
+        /Structural\\s*(?:Components)?[.:]*\\s*(\\d+)(?:[/](\\d+))?/i,
+        /Reinforcement\\s*(?:Parts)?[.:]*\\s*(\\d+)(?:[/](\\d+))?/i,
+        /Cockpit\\s*(?:Conditions)?[.:]*\\s*(\\d+)(?:[/](\\d+))?/i,
+        /New\\s*Energy[.:]*\\s*(\\d+)(?:[/](\\d+))?/i,
     ];
     const inspLabels = [
         'exterior', 'interior', 'configuration',
