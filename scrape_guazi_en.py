@@ -476,6 +476,9 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
         if reg_m:
             reg_date = f"{reg_m.group(1)}-{int(reg_m.group(2)):02d}-01"
 
+    if not reg_date and mfg_date:
+        reg_date = mfg_date
+
     # Mileage
     mileage_km = parse_int(specs.get("mileage"))
     if not mileage_km and parsed:
@@ -630,7 +633,6 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
         "complectation": complectation or None,
         "year": year,
         "reg_date": reg_date,
-        "mfg_date": mfg_date,
 
         "price_original": price_usd,
         "price_currency": PRICE_CURRENCY,
