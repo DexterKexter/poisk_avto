@@ -5,13 +5,6 @@ on:
     - cron: '45 */3 * * *'
   workflow_dispatch:
     inputs:
-      brands:
-        required: false
-        default: ''
-        description: 'Comma-separated brand slugs (empty = auto-discover)'
-      max_pages_per_brand:
-        required: false
-        default: '50'
       min_year:
         required: false
         default: '2021'
@@ -24,7 +17,14 @@ on:
       grades:
         required: false
         default: 'S,A'
-        description: 'Comma-separated grades to keep (S,A,B,C,D or empty=all)'
+        description: 'Grades: S,A,B,C,D (comma-separated)'
+      seller_types:
+        required: false
+        default: '180003,180002'
+        description: '180003=Guazi Owned, 180002=Certified Dealer'
+      max_pages:
+        required: false
+        default: '500'
       collect_limit:
         required: false
         default: '20000'
@@ -64,13 +64,13 @@ jobs:
           GUAZI_PASSWORD: ${{ secrets.GUAZI_PASSWORD }}
         run: |
           python collect_guazi_en.py \
-            --brands             "${{ inputs.brands             || '' }}" \
-            --max-pages-per-brand ${{ inputs.max_pages_per_brand || 50 }} \
-            --min-year            ${{ inputs.min_year            || 2021 }} \
-            --max-mileage-km      ${{ inputs.max_mileage_km     || 100000 }} \
-            --min-price-usd       ${{ inputs.min_price_usd      || 7000 }} \
-            --grades             "${{ inputs.grades             || 'S,A' }}" \
-            --limit               ${{ inputs.collect_limit      || 20000 }}
+            --min-year       ${{ inputs.min_year       || 2021 }} \
+            --max-mileage-km ${{ inputs.max_mileage_km || 100000 }} \
+            --min-price-usd  ${{ inputs.min_price_usd  || 7000 }} \
+            --grades        "${{ inputs.grades         || 'S,A' }}" \
+            --seller-types  "${{ inputs.seller_types   || '180003,180002' }}" \
+            --max-pages      ${{ inputs.max_pages      || 500 }} \
+            --limit          ${{ inputs.collect_limit   || 20000 }}
 
       - name: Scrape detail pages
         env:

@@ -321,18 +321,35 @@ def upsert_pending(card: dict) -> bool:
     return DB.upsert_pending(rec)
 
 
+def build_search_url(min_price: int, min_year: int, max_mileage: int,
+                     grades: str, seller_types: str, page: int) -> str:
+    """Build en.guazi.com search URL with server-side filters."""
+    params = {
+        "price": f"{min_price},",
+        "licenseYear": f"{min_year},",
+        "roadHaul": f"0,{max_mileage}",
+    }
+    if grades:
+        params["detectionLevels"] = grades
+    if seller_types:
+        params["vehicleSourceClassificationCustomers"] = seller_types
+    if page > 1:
+        params["page"] = str(page)
+    qs = "&".join(f"{k}={v}" for k, v in params.items())
+    return f"{BASE_URL}/used-cars/?{qs}"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--brands", type=str, default="")
-    ap.add_argument("--max-pages-per-brand", type=int, default=50)
     ap.add_argument("--min-year", type=int, default=2021)
     ap.add_argument("--max-mileage-km", type=int, default=100_000)
     ap.add_argument("--min-price-usd", type=int, default=7_000)
     ap.add_argument("--grades", type=str, default="S,A")
+    ap.add_argument("--seller-types", type=str, default="180003,180002",
+                    help="180003=Guazi Owned, 180002=Certified Dealer")
+    ap.add_argument("--max-pages", type=int, default=500)
     ap.add_argument("--limit", type=int, default=20_000)
     args = ap.parse_args()
-
-    allowed_grades = set(g.strip().upper() for g in args.grades.split(",") if g.strip()) if args.grades else None
 
     if not DB.USE_POSTGRES:
         sys.exit("Need Postgres")
@@ -340,9 +357,9 @@ def main() -> None:
     guazi_email = os.environ.get("GUAZI_EMAIL", "")
     guazi_password = os.environ.get("GUAZI_PASSWORD", "")
 
-    print(f"Collecting en.guazi.com listings")
-    print(f"  filters: year>={args.min_year}, mileage<={args.max_mileage_km:,}km, "
-          f"price>=${args.min_price_usd:,}, grades={allowed_grades or 'any'}")
+    print(f"Collecting en.guazi.com (server-side filtered)")
+    print(f"  price>=${args.min_price_usd:,}, year>={args.min_year}, "
+          f"mileage<={args.max_mileage_km:,}km, grades={args.grades}")
 
     pw = sync_playwright().start()
     browser = pw.chromium.launch(
@@ -358,103 +375,67 @@ def main() -> None:
     )
     page = ctx.new_page()
 
-    # Optional login
     if guazi_email and guazi_password:
         login(page, guazi_email, guazi_password)
 
-    # Discover brands from the listing page
-    if args.brands:
-        brand_slugs = [b.strip() for b in args.brands.split(",") if b.strip()]
-    else:
-        print("  Discovering brands from /used-cars/ ...")
-        page.goto(f"{BASE_URL}/used-cars/", wait_until="domcontentloaded",
-                  timeout=30_000)
-        page.wait_for_timeout(2000)
-        brand_slugs = page.evaluate(DISCOVER_BRANDS_JS)
-        if not brand_slugs:
-            # Fallback to hardcoded popular brands
-            brand_slugs = [
-                "toyota", "volkswagen", "bmw", "mercedes-benz", "audi",
-                "honda", "nissan", "hyundai", "byd", "geely-auto",
-                "tesla", "buick", "ford", "mazda", "kia",
-                "chery", "haval", "changan", "great-wall", "volvo",
-                "lexus", "porsche", "land-rover", "cadillac", "mg",
-                "nio", "xpeng", "li-auto", "zeekr", "xiaomi-auto",
-                "chevrolet", "subaru", "mitsubishi", "jetour",
-                "hongqi", "tank", "wuling", "skoda",
-            ]
-        print(f"  Found {len(brand_slugs)} brands: {brand_slugs[:10]}...")
-
     saved = 0
-    skipped = 0
     seen: set[str] = set()
     started = time.time()
+    page_num = 1
+    empty_streak = 0
 
-    for brand_slug in brand_slugs:
-        if saved >= args.limit:
-            break
-        brand_name = BRAND_SLUG_TO_NAME.get(brand_slug, brand_slug.replace("-", " ").title())
-        print(f"\n[{brand_name}] /used-cars/{brand_slug}/")
+    while page_num <= args.max_pages and saved < args.limit:
+        url = build_search_url(
+            args.min_price_usd, args.min_year, args.max_mileage_km,
+            args.grades, args.seller_types, page_num)
 
-        page_num = 1
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(1500)
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1000)
+        except Exception as e:
+            print(f"  page {page_num}: load error — {e}")
+            empty_streak += 1
+            if empty_streak >= 3:
+                break
+            page_num += 1
+            continue
+
+        if page_num == 1:
+            total = page.evaluate(TOTAL_RESULTS_JS)
+            print(f"  {total:,} results matching filters")
+
+        cards = extract_cards_from_page(page)
+        if not cards:
+            empty_streak += 1
+            if empty_streak >= 3:
+                print(f"  {empty_streak} empty pages in a row — stopping")
+                break
+            page_num += 1
+            continue
         empty_streak = 0
 
-        while page_num <= args.max_pages_per_brand and saved < args.limit:
-            if page_num == 1:
-                url = f"{BASE_URL}/used-cars/{brand_slug}/"
-            else:
-                url = f"{BASE_URL}/used-cars/{brand_slug}/page{page_num}/"
-
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_timeout(1500)
-
-                # Scroll to trigger lazy-loading
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                page.wait_for_timeout(1000)
-            except Exception as e:
-                print(f"  page {page_num}: load error — {e}")
-                break
-
-            if page_num == 1:
-                total = page.evaluate(TOTAL_RESULTS_JS)
-                print(f"  {total:,} results total")
-
-            cards = extract_cards_from_page(page)
-            if not cards:
-                empty_streak += 1
-                if empty_streak >= 2:
-                    break
-                page_num += 1
+        page_saved = 0
+        for card in cards:
+            if card["item_id"] in seen:
                 continue
-            empty_streak = 0
+            seen.add(card["item_id"])
+            if upsert_pending(card):
+                saved += 1
+                page_saved += 1
 
-            page_saved = 0
-            for card in cards:
-                if card["item_id"] in seen:
-                    continue
-                seen.add(card["item_id"])
-                ok, reason = card_passes_filters(
-                    card, args.min_year, args.max_mileage_km, args.min_price_usd,
-                    allowed_grades)
-                if not ok:
-                    skipped += 1
-                    continue
-                if upsert_pending(card):
-                    saved += 1
-                    page_saved += 1
-
-            elapsed = int(time.time() - started)
-            print(f"  page {page_num}: {len(cards)} cards -> {page_saved} kept "
-                  f"(total {saved}, {elapsed}s)")
-            page_num += 1
-            time.sleep(0.5)
+        elapsed = int(time.time() - started)
+        print(f"  page {page_num}: {len(cards)} cards -> {page_saved} new "
+              f"(total {saved}, {elapsed}s)")
+        page_num += 1
+        time.sleep(0.3)
 
     browser.close()
     pw.stop()
 
     elapsed = int(time.time() - started)
-    print(f"\nDone in {elapsed}s. Upserted: {saved}, filtered: {skipped}")
+    print(f"\nDone in {elapsed}s. Saved: {saved} from {page_num - 1} pages")
 
 
 if __name__ == "__main__":
