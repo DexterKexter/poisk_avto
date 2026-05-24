@@ -1,6 +1,6 @@
 # Poisk Avto — мульти-источник парсер автомобилей для импорта в КЗ
 
-Парсер объявлений с **5 источников** (3 китайских + 1 международный + 1 корейский), плюс каталог брендов, моделей и поколений. Цель — показать клиенту из Казахстана **готовые к ввозу** машины с реальными ценами, фото, VIN и историей проверок.
+Парсер объявлений с **4 источников** (2 китайских + 1 международный + 1 корейский), плюс каталог брендов, моделей и поколений. Цель — показать клиенту из Казахстана **готовые к ввозу** машины с реальными ценами, фото, VIN и историей проверок.
 
 База — Supabase Postgres. Парсеры — Python + GitHub Actions. **Стоимость инфры — $0/мес**.
 
@@ -10,7 +10,6 @@
 poisk_avto/
 ├── README.md                       # этот файл
 ├── README_che168.md                # 🇨🇳 dealer-площадка, VIN + reports
-├── README_guazi.md                 # 🇨🇳 C2C с inspection scorecard
 ├── README_encar.md                 # 🇰🇷 корейский б/у — VIN, ДТП-отчёты
 ├── README_autocango.md             # 🇨🇳 экспорт, FOB USD
 │
@@ -23,10 +22,8 @@ poisk_avto/
 ├── collect_che168.py               # playwright, 6 городов + фильтры
 ├── scrape_che168.py                # playwright, VIN + photos + trust badges
 │
-├── collect_guazi.py                # Chinese guazi (playwright + Oxylabs)
-├── scrape_guazi.py                 # Chinese guazi detail pages
-├── collect_guazi_en.py             # EN export guazi (en.guazi.com, playwright)
-├── scrape_guazi_en.py              # EN guazi detail pages (USD, Grade, inspection)
+├── collect_guazi_en.py             # EN guazi (en.guazi.com, playwright, без прокси)
+├── scrape_guazi_en.py              # EN guazi detail pages (USD FOB, Grade, inspection)
 │
 ├── collect_encar.py                # Korea API (direct HTTP)
 ├── scrape_encar.py                 # Korea detail (direct HTTP, Full HD photos)
@@ -47,7 +44,6 @@ poisk_avto/
 │
 └── .github/workflows/
     ├── scrape-che168.yml           # */4h
-    ├── scrape-guazi.yml            # */2h (Chinese)
     ├── scrape-guazi-en.yml         # */3h (EN export, USD FOB)
     ├── scrape-encar.yml            # ежечасно (paused)
     ├── scrape-autocango.yml        # */12h
@@ -60,8 +56,7 @@ poisk_avto/
 | Источник | Метод | Язык | Валюта | Главная фишка |
 |---|---|---|---|---|
 | **che168** | playwright | CN→EN (chinese_maps) | CNY | VIN + maintenance/insurance reports |
-| **guazi (CN)** | playwright + Oxylabs | CN→EN | CNY | inspection scorecard |
-| **guazi (EN)** | playwright | English | USD FOB | Grade A-S, inspection scores, partial VIN, 29 HD фото |
+| **guazi** | playwright | English | USD FOB | Grade A-S, inspection scores, partial VIN, 110 колонок |
 | **encar** | direct HTTP API | KR→EN | KRW | VIN, ДТП, Full HD photos |
 | **autocango** | playwright | EN | USD | FOB pricing, original-paint флаг |
 
@@ -69,9 +64,9 @@ poisk_avto/
 
 ```
 ┌─────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────────┐
-│ che168.com   │ │ guazi.com    │ │ encar.com    │ │ autocango.com    │
-│ + en.guazi   │ │ (CN + EN)   │ │ Korea API    │ │ export catalog   │
-│ playwright   │ │ playwright   │ │ direct HTTP  │ │ playwright       │
+│ che168.com   │ │ en.guazi.com │ │ encar.com    │ │ autocango.com    │
+│ playwright   │ │ playwright   │ │ Korea API    │ │ export catalog   │
+│ CN→EN maps   │ │ English      │ │ direct HTTP  │ │ playwright       │
 └──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └────────┬─────────┘
        └────────────────┼────────────────┼──────────────────┘
                         ▼                ▼
@@ -125,7 +120,6 @@ poisk_avto/
 | Workflow | Cron | Статус |
 |---|---|---|
 | `scrape-che168.yml` | `15 */4 * * *` | ✅ active |
-| `scrape-guazi.yml` | `30 */2 * * *` | ✅ active |
 | `scrape-guazi-en.yml` | `45 */3 * * *` | ✅ active |
 | `scrape-encar.yml` | `0 * * * *` | ⏸️ paused |
 | `scrape-autocango.yml` | `45 */12 * * *` | ✅ active |
@@ -138,9 +132,8 @@ poisk_avto/
 |---|---|
 | `SUPABASE_URL` | везде |
 | `SUPABASE_KEY` | везде |
-| `OXY_USER` / `OXY_PASS` | guazi CN (Oxylabs proxy) |
+| `GUAZI_EMAIL` / `GUAZI_PASSWORD` | en.guazi.com (опционально) |
 | `OPENROUTER_API_KEY` | (зарезервирован для LLM) |
-| `GUAZI_EMAIL` / `GUAZI_PASSWORD` | en.guazi.com dealer auth |
 
 ## Edge Functions (Supabase)
 
