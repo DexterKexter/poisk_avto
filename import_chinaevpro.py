@@ -21,9 +21,13 @@ import time
 import traceback
 from typing import Any
 
+import urllib3
 import requests
 
 import db as DB
+
+# Suppress SSL warnings (system clock may be ahead of cert validity)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -49,7 +53,7 @@ def _fetch(url: str, retries: int = 3) -> str | None:
     """GET a URL and return its text, with retries."""
     for attempt in range(1, retries + 1):
         try:
-            r = requests.get(url, headers=HEADERS, timeout=30)
+            r = requests.get(url, headers=HEADERS, timeout=30, verify=False)
             if r.status_code == 200:
                 return r.text
             print(f"    HTTP {r.status_code} for {url} (attempt {attempt})")
@@ -161,12 +165,20 @@ def parse_brand_page(slug: str, html: str) -> dict[str, Any]:
             unique_links.append(lnk)
 
     # Collect prices from font-bold text-green-600
+    # In the decoded RSC payload, prices appear as "$$14,000" (literal double dollar)
     prices: list[str] = []
     for pm in re.finditer(
         r'font-bold text-green-600"[^}]*"children":"\$\$([\d,]+)"',
         payload,
     ):
         prices.append(pm.group(1))
+    if not prices:
+        # Fallback: try escaped form
+        for pm in re.finditer(
+            r'font-bold text-green-600[^}]*"children":"[^"]*?([\d]{1,3}(?:,\d{3})+)"',
+            payload,
+        ):
+            prices.append(pm.group(1))
 
     for idx, section in enumerate(model_sections[1:]):
         # Image filename
@@ -233,8 +245,14 @@ def parse_brand_page(slug: str, html: str) -> dict[str, Any]:
 
 
 def upsert_brand(rec: dict) -> bool:
-    """Upsert a brand row using on_conflict=slug."""
+    """Upsert a brand row.
+
+    Tries on_conflict=slug first (simple unique on slug).
+    Falls back to on_conflict=source,slug (composite unique) if the first fails.
+    """
     rec = {**rec, "updated_at": DB.now_iso()}
+
+    # Try slug-only constraint first
     r = DB._pg_request(
         "POST",
         "brands?on_conflict=slug",
@@ -248,13 +266,36 @@ def upsert_brand(rec: dict) -> bool:
             return True
     if r.status_code == 204:
         return True
+
+    # Fallback: composite unique (source, slug)
+    if r.status_code in (400, 409):
+        r2 = DB._pg_request(
+            "POST",
+            "brands?on_conflict=source,slug",
+            headers={"Prefer": "return=representation,resolution=merge-duplicates"},
+            json=rec,
+        )
+        if r2.status_code in (200, 201):
+            try:
+                return r2.json()[0].get("id")
+            except (IndexError, KeyError, TypeError):
+                return True
+        if r2.status_code == 204:
+            return True
+        print(f"  brand upsert FAIL {r2.status_code}: {r2.text[:300]}")
+        return False
+
     print(f"  brand upsert FAIL {r.status_code}: {r.text[:300]}")
     return False
 
 
 def upsert_model(rec: dict) -> bool:
-    """Upsert a model row using on_conflict=slug."""
+    """Upsert a model row.
+
+    Tries on_conflict=slug first, falls back to on_conflict=source,slug.
+    """
     rec = {**rec, "updated_at": DB.now_iso()}
+
     r = DB._pg_request(
         "POST",
         "models?on_conflict=slug",
@@ -263,6 +304,20 @@ def upsert_model(rec: dict) -> bool:
     )
     if r.status_code in (200, 201, 204):
         return True
+
+    # Fallback: composite unique
+    if r.status_code in (400, 409):
+        r2 = DB._pg_request(
+            "POST",
+            "models?on_conflict=source,slug",
+            headers={"Prefer": "return=minimal,resolution=merge-duplicates"},
+            json=rec,
+        )
+        if r2.status_code in (200, 201, 204):
+            return True
+        print(f"  model upsert FAIL {r2.status_code}: {r2.text[:300]}")
+        return False
+
     print(f"  model upsert FAIL {r.status_code}: {r.text[:300]}")
     return False
 
@@ -286,9 +341,11 @@ def main() -> None:
                     help="Comma-separated brand slugs to process (default: all)")
     ap.add_argument("--limit", type=int, default=0,
                     help="Process only first N brands (0 = all)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Scrape only, print results, skip DB writes")
     args = ap.parse_args()
 
-    if not DB.USE_POSTGRES:
+    if not args.dry_run and not DB.USE_POSTGRES:
         sys.exit("Need Postgres (SUPABASE_URL + SUPABASE_KEY)")
 
     print("=== import_chinaevpro.py ===\n")
@@ -334,6 +391,18 @@ def main() -> None:
 
         print(f"  brand: {brand['name']}, logo={'yes' if brand['logo_url'] else 'no'}, "
               f"models={len(models)}")
+
+        if args.dry_run:
+            # Print what would be written
+            for mi, model in enumerate(models):
+                p = model.get("price_from_usd")
+                print(f"    [{mi+1}] {model['name']:25} {model.get('body_type','?'):18} "
+                      f"${p:>7,}" if p else
+                      f"    [{mi+1}] {model['name']:25} {model.get('body_type','?'):18} "
+                      f"$    N/A")
+            brands_ok += 1
+            models_ok += len(models)
+            continue
 
         # Upsert brand
         result = upsert_brand(brand)
