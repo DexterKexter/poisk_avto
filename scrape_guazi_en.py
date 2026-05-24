@@ -483,8 +483,17 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
     if not mileage_km:
         mileage_km = meta.get("mileage_km")
 
-    # Price
+    # Price — JS extraction + Python fallback from raw text
     price_usd = detail.get("price_usd") or meta.get("price_usd")
+    if not price_usd and raw_text:
+        # Try: FOB Price:$XX,XXX or $XX,XXX FOB or just $XX,XXX
+        for pat in [r'FOB\s*Price[:\s]*\$\s*([\d,]+)',
+                    r'\$\s*([\d,]+)\s*FOB',
+                    r'\$\s*([\d,]{4,})']:
+            pm = re.search(pat, raw_text, re.IGNORECASE)
+            if pm:
+                price_usd = int(pm.group(1).replace(",", ""))
+                break
 
     # Color
     color_raw = specs.get("color", "")
@@ -518,7 +527,8 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
     engine_type = tr(fuel_raw, FUEL_MAP)
 
     # Horsepower
-    hp = parse_int(specs.get("horsepower"))
+    hp_raw = parse_float(specs.get("horsepower"))
+    hp = int(hp_raw) if hp_raw else None
 
     # Body type
     body_type = specs.get("body_style", "")
