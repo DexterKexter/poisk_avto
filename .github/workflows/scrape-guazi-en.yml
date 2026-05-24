@@ -14,13 +14,17 @@ on:
         default: '50'
       min_year:
         required: false
-        default: '2015'
+        default: '2021'
       max_mileage_km:
         required: false
-        default: '200000'
+        default: '100000'
       min_price_usd:
         required: false
-        default: '500'
+        default: '7000'
+      grades:
+        required: false
+        default: 'S,A'
+        description: 'Comma-separated grades to keep (S,A,B,C,D or empty=all)'
       collect_limit:
         required: false
         default: '20000'
@@ -62,9 +66,10 @@ jobs:
           python collect_guazi_en.py \
             --brands             "${{ inputs.brands             || '' }}" \
             --max-pages-per-brand ${{ inputs.max_pages_per_brand || 50 }} \
-            --min-year            ${{ inputs.min_year            || 2015 }} \
-            --max-mileage-km      ${{ inputs.max_mileage_km     || 200000 }} \
-            --min-price-usd       ${{ inputs.min_price_usd      || 500 }} \
+            --min-year            ${{ inputs.min_year            || 2021 }} \
+            --max-mileage-km      ${{ inputs.max_mileage_km     || 100000 }} \
+            --min-price-usd       ${{ inputs.min_price_usd      || 7000 }} \
+            --grades             "${{ inputs.grades             || 'S,A' }}" \
             --limit               ${{ inputs.collect_limit      || 20000 }}
 
       - name: Scrape detail pages

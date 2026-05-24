@@ -278,13 +278,16 @@ def extract_cards_from_page(page) -> list[dict]:
 
 
 def card_passes_filters(card: dict, min_year: int, max_mileage_km: int,
-                        min_price_usd: int) -> tuple[bool, str]:
+                        min_price_usd: int,
+                        allowed_grades: set[str] | None = None) -> tuple[bool, str]:
     if card["year"] < min_year:
         return False, f"year {card['year']} < {min_year}"
     if card["mileage_km"] > max_mileage_km:
         return False, f"mileage {card['mileage_km']} > {max_mileage_km}"
     if card.get("price_usd") and card["price_usd"] < min_price_usd:
         return False, f"price ${card['price_usd']} < ${min_price_usd}"
+    if allowed_grades and card.get("grade") and card["grade"] not in allowed_grades:
+        return False, f"grade {card['grade']} not in {allowed_grades}"
     return True, ""
 
 
@@ -317,11 +320,14 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--brands", type=str, default="")
     ap.add_argument("--max-pages-per-brand", type=int, default=50)
-    ap.add_argument("--min-year", type=int, default=2015)
-    ap.add_argument("--max-mileage-km", type=int, default=200_000)
-    ap.add_argument("--min-price-usd", type=int, default=500)
+    ap.add_argument("--min-year", type=int, default=2021)
+    ap.add_argument("--max-mileage-km", type=int, default=100_000)
+    ap.add_argument("--min-price-usd", type=int, default=7_000)
+    ap.add_argument("--grades", type=str, default="S,A")
     ap.add_argument("--limit", type=int, default=20_000)
     args = ap.parse_args()
+
+    allowed_grades = set(g.strip().upper() for g in args.grades.split(",") if g.strip()) if args.grades else None
 
     if not DB.USE_POSTGRES:
         sys.exit("Need Postgres")
@@ -331,7 +337,7 @@ def main() -> None:
 
     print(f"Collecting en.guazi.com listings")
     print(f"  filters: year>={args.min_year}, mileage<={args.max_mileage_km:,}km, "
-          f"price>=${args.min_price_usd:,}")
+          f"price>=${args.min_price_usd:,}, grades={allowed_grades or 'any'}")
 
     pw = sync_playwright().start()
     browser = pw.chromium.launch(
@@ -424,7 +430,8 @@ def main() -> None:
                     continue
                 seen.add(card["item_id"])
                 ok, reason = card_passes_filters(
-                    card, args.min_year, args.max_mileage_km, args.min_price_usd)
+                    card, args.min_year, args.max_mileage_km, args.min_price_usd,
+                    allowed_grades)
                 if not ok:
                     skipped += 1
                     continue
