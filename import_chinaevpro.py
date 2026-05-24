@@ -24,6 +24,12 @@ from typing import Any
 import urllib3
 import requests
 
+try:
+    from playwright.sync_api import sync_playwright
+    HAS_PLAYWRIGHT = True
+except ImportError:
+    HAS_PLAYWRIGHT = False
+
 import db as DB
 
 # Suppress SSL warnings (system clock may be ahead of cert validity)
@@ -240,6 +246,74 @@ def parse_brand_page(slug: str, html: str) -> dict[str, Any]:
     }
 
 
+# ------------------------------------------------- full models via Playwright
+
+EXTRACT_MODELS_JS = """(brandSlug) => {
+    const cards = document.querySelectorAll('a[href*="/models/"]');
+    const results = [];
+    const seen = new Set();
+    for (const card of cards) {
+        const href = card.getAttribute('href') || '';
+        if (!href.startsWith('/models/') || href === '/models/' || seen.has(href)) continue;
+        seen.add(href);
+        const slug = href.replace('/models/', '');
+
+        const text = card.innerText || '';
+        const lines = text.split('\\n').map(l => l.trim()).filter(l => l);
+
+        let name = '', bodyType = '', price = null;
+        for (const line of lines) {
+            if (line === 'Available' || line === 'Upcoming' || line === 'View Details') continue;
+            if (/^(Sedan|SUV|Hatchback|Minivan|Coupe|Wagon|Pickup|Van|Truck|Liftback|MPV|Shooting Brake|Coupe SUV|Sports Car)/i.test(line)) {
+                bodyType = line;
+            } else if (/^\\$[\\d,]+$/.test(line)) {
+                price = parseInt(line.replace(/[$,]/g, ''), 10);
+            } else if (!name && line.length > 1 && !/^From/.test(line)) {
+                name = line;
+            }
+        }
+
+        const img = card.querySelector('img');
+        const imgSrc = img ? (img.src || img.getAttribute('data-src') || '') : '';
+
+        if (name) {
+            results.push({ name, slug, bodyType, price, imgSrc });
+        }
+    }
+    return results;
+}"""
+
+
+def fetch_all_models_playwright(brand_slug: str, page) -> list[dict]:
+    """Fetch ALL models for a brand via /models?brand={slug} using Playwright."""
+    url = f"{BASE_URL}/models?brand={brand_slug}"
+    try:
+        page.goto(url, wait_until="networkidle", timeout=30_000)
+        page.wait_for_timeout(2000)
+        # Scroll to load all
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(1000)
+
+        raw = page.evaluate(EXTRACT_MODELS_JS, brand_slug)
+        models = []
+        for r in raw:
+            model = {
+                "name": r["name"],
+                "slug": r["slug"],
+                "body_type": r.get("bodyType") or None,
+                "price_from_usd": r.get("price") or None,
+                "source": SOURCE,
+            }
+            img = r.get("imgSrc", "")
+            if img and "model-images" in img:
+                model["image_url"] = img
+            models.append(model)
+        return models
+    except Exception as e:
+        print(f"  Playwright error for {brand_slug}: {e}")
+        return []
+
+
 # ------------------------------------------------- database upserts
 
 
@@ -353,7 +427,19 @@ def main() -> None:
         print("Nothing to process.")
         return
 
-    # 2. Process each brand
+    # 2. Start Playwright for full model catalog
+    pw_page = None
+    if HAS_PLAYWRIGHT and not args.dry_run:
+        print("Starting Playwright for full model catalog...")
+        pw = sync_playwright().start()
+        browser = pw.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
+        )
+        ctx = browser.new_context(user_agent=UA, locale="en-US",
+                                  viewport={"width": 1366, "height": 900})
+        pw_page = ctx.new_page()
+
     started = time.time()
     brands_ok = 0
     brands_fail = 0
@@ -373,6 +459,17 @@ def main() -> None:
         data = parse_brand_page(slug, html)
         brand = data["brand"]
         models = data["models"]
+
+        # Fetch FULL model catalog via Playwright (not just 6 featured)
+        if pw_page:
+            full_models = fetch_all_models_playwright(slug, pw_page)
+            if full_models:
+                # Merge: full_models is authoritative, keep RSC models as fallback
+                existing_slugs = {m["slug"] for m in full_models}
+                for m in models:
+                    if m["slug"] not in existing_slugs:
+                        full_models.append(m)
+                models = full_models
 
         print(f"  brand: {brand['name']}, logo={'yes' if brand['logo_url'] else 'no'}, "
               f"models={len(models)}")
@@ -415,6 +512,10 @@ def main() -> None:
         # Small delay to be polite
         if bi < len(all_slugs):
             time.sleep(0.5)
+
+    if pw_page:
+        browser.close()
+        pw.stop()
 
     elapsed = int(time.time() - started)
     print(f"\n=== Done in {elapsed}s ===")
