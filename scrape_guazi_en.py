@@ -111,22 +111,37 @@ EXTRACT_DETAIL_JS = """() => {
     const data = {};
     const text = document.body.innerText || '';
 
-    // Title
+    // Title: strip "Grade X" prefix and "Used " prefix
     const h1 = document.querySelector('h1');
-    data.title = h1 ? h1.innerText.trim() : '';
+    let rawTitle = h1 ? h1.innerText.trim() : '';
+    rawTitle = rawTitle.replace(/^Grade\\s*\\n?\\s*[SABCD]\\s*\\n?/i, '').trim();
+    rawTitle = rawTitle.replace(/^Used\\s+/i, '').trim();
+    data.title = rawTitle;
 
-    // Price
-    const priceMatch = text.match(/\\$([\\d,]+)\\s*FOB/i);
-    data.price_usd = priceMatch ? parseInt(priceMatch[1].replace(/,/g, ''), 10) : null;
-
-    // Grade
-    const gradeEl = document.querySelector('[class*="grade" i], [class*="Grade"]');
-    if (gradeEl) {
-        data.grade = (gradeEl.innerText || '').trim().replace(/^Grade\\s*/i, '');
-    } else {
-        const gm = text.match(/Grade\\s*([ABCDS])/i);
-        data.grade = gm ? gm[1].toUpperCase() : '';
+    // Price: try multiple patterns
+    let price = null;
+    // Pattern 1: $XX,XXX FOB
+    const p1 = text.match(/\\$\\s*([\\d,]+)\\s*FOB/i);
+    if (p1) price = parseInt(p1[1].replace(/,/g, ''), 10);
+    // Pattern 2: FOB Price: $XX,XXX  or  FOB Price$XX,XXX
+    if (!price) {
+        const p2 = text.match(/FOB\\s*Price[:\\s]*\\$\\s*([\\d,]+)/i);
+        if (p2) price = parseInt(p2[1].replace(/,/g, ''), 10);
     }
+    // Pattern 3: any $XX,XXX on the page (at least 4 digits = real price)
+    if (!price) {
+        const p3 = text.match(/\\$\\s*([\\d,]{4,})/);
+        if (p3) price = parseInt(p3[1].replace(/,/g, ''), 10);
+    }
+    data.price_usd = price;
+
+    // Grade: extract single letter
+    let grade = '';
+    const gradeMatch = text.match(/Grade\\s*\\n?\\s*([SABCD])\\b/i);
+    if (gradeMatch) {
+        grade = gradeMatch[1].toUpperCase();
+    }
+    data.grade = grade;
 
     // Item number
     const itemMatch = text.match(/Item\\s*(?:No|Number)[.:]*\\s*([a-z0-9]+)/i);
@@ -248,17 +263,22 @@ EXTRACT_DETAIL_JS = """() => {
     data.no_water = text.includes('No Water');
     data.no_fire = text.includes('No Fire');
 
-    // Photos
+    // Photos: only real car images (jpg from guazistatic), skip gif/png icons
     data.photos = [];
-    const imgs = document.querySelectorAll('img[src*="guazi"], img[src*="image-public"]');
+    const imgs = document.querySelectorAll('img');
     const seenUrls = new Set();
     for (const img of imgs) {
         const src = img.src || img.getAttribute('data-src') || '';
         if (!src || seenUrls.has(src)) continue;
-        // Skip tiny UI icons
-        if (src.includes('icon') || src.includes('logo') || src.includes('flag')) continue;
-        const w = img.naturalWidth || img.width || 0;
-        if (w > 0 && w < 50) continue;
+        // Must be from guazi CDN
+        if (!src.includes('guazistatic') && !src.includes('image-oversea')) continue;
+        // Skip icons, badges, gifs, tiny pngs
+        if (src.includes('icon') || src.includes('logo') || src.includes('flag')
+            || src.includes('assets/') || src.endsWith('.gif')) continue;
+        // Keep jpg car photos + large pngs (inspection reports)
+        const base = src.split('?')[0];
+        if (seenUrls.has(base)) continue;
+        seenUrls.add(base);
         seenUrls.add(src);
         data.photos.push(src);
     }
@@ -370,6 +390,11 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
     parsed = parse_slug(slug) if slug else None
 
     title = detail.get("title") or meta.get("title", "")
+    # Strip any leftover "Grade X" / "Used" prefix from title
+    title = re.sub(r"^Grade\s*\n?\s*[SABCD]\s*\n?", "", title, flags=re.IGNORECASE).strip()
+    title = re.sub(r"^Used\s+", "", title, flags=re.IGNORECASE).strip()
+    if not title and parsed:
+        title = parsed["brand_series_slug"].replace("-", " ").title() + f" {parsed['year']}"
     if not title:
         return None
 
@@ -460,8 +485,10 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
     if vin and len(vin) < 8:
         vin = None
 
-    # Inspection
-    grade = detail.get("grade", "") or meta.get("grade", "")
+    # Inspection — clean grade to single letter
+    grade_raw = detail.get("grade", "") or meta.get("grade", "")
+    grade_m = re.search(r"[SABCD]", grade_raw.upper()) if grade_raw else None
+    grade = grade_m.group() if grade_m else ""
     inspection = detail.get("inspection", {})
     if grade:
         inspection["grade"] = grade
@@ -471,7 +498,8 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
 
     # Photos
     raw_photos = detail.get("photos", [])
-    photos = [upgrade_photo(p) for p in raw_photos if "guazi" in p or "image" in p]
+    photos = [upgrade_photo(p) for p in raw_photos
+              if ("guazi" in p or "image-oversea" in p) and not p.endswith(".gif")]
     # Deduplicate keeping order
     seen_photos: set[str] = set()
     unique_photos: list[str] = []
