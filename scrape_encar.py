@@ -216,7 +216,15 @@ def parse_car(api_car: dict) -> dict | None:
         mark_en = ENCAR_BRAND_ALIASES.get(mark_en, mark_en)
         model_group_en = category.get("modelGroupEnglishName", "")
         grade_en = category.get("gradeEnglishName", "")
-        model_str = " ".join(x for x in (model_group_en, grade_en) if x).strip()
+
+        # Korean→global model aliases
+        ENCAR_MODEL_ALIASES = {
+            "avante": "Elantra", "canival": "Carnival", "morning": "Picanto",
+            "santafe": "Santa Fe", "grandeur": "Azera", "starex": "H-1",
+            "mohave": "Borrego", "qm6": "Koleos",
+        }
+        model_clean = ENCAR_MODEL_ALIASES.get(model_group_en.lower(), model_group_en)
+        complectation_str = grade_en or category.get("gradeName", "")
 
         ts = DB.now_iso()
 
@@ -225,15 +233,13 @@ def parse_car(api_car: dict) -> dict | None:
             "source_id": source_id,
             "source_language": SOURCE_LANGUAGE,
             "url": CARD_URL_TPL.format(id=source_id),
-            "title": " ".join(x for x in (mark_en, model_str) if x).strip(),
+            "title": " ".join(x for x in (mark_en, model_clean, complectation_str) if x).strip(),
 
             "mark_original": mark_orig,
             "mark": mark_en,
-            # Use English series for display — Korean modelName goes nowhere
-            # visible (frontend reads series_original directly).
             "series_original": model_group_en or category.get("modelName", ""),
-            "model": model_str or model_group_en or category.get("modelName", ""),
-            "complectation": grade_en or category.get("gradeName", ""),
+            "model": model_clean or model_group_en or category.get("modelName", ""),
+            "complectation": complectation_str,
             "year": year,
 
             "price_original": price,
