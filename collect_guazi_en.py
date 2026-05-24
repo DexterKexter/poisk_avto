@@ -286,8 +286,13 @@ def card_passes_filters(card: dict, min_year: int, max_mileage_km: int,
         return False, f"mileage {card['mileage_km']} > {max_mileage_km}"
     if card.get("price_usd") and card["price_usd"] < min_price_usd:
         return False, f"price ${card['price_usd']} < ${min_price_usd}"
-    if allowed_grades and card.get("grade") and card["grade"] not in allowed_grades:
-        return False, f"grade {card['grade']} not in {allowed_grades}"
+    # Grade filter: only apply if grade was reliably extracted (non-empty)
+    # AND is a known grade value. Skip if grade looks like a false positive
+    # from regex matching random letters in card text.
+    grade = card.get("grade", "")
+    if allowed_grades and grade and len(grade) == 1 and grade in "SABCD":
+        if grade not in allowed_grades:
+            return False, f"grade {grade} not in {allowed_grades}"
     return True, ""
 
 
