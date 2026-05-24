@@ -111,37 +111,22 @@ EXTRACT_DETAIL_JS = """() => {
     const data = {};
     const text = document.body.innerText || '';
 
-    // Title: strip "Grade X" prefix and "Used " prefix
+    // Title
     const h1 = document.querySelector('h1');
-    let rawTitle = h1 ? h1.innerText.trim() : '';
-    rawTitle = rawTitle.replace(/^Grade[\\s\\S]*?[SABCD]\\s*/i, '').trim();
-    rawTitle = rawTitle.replace(/^Used\\s+/i, '').trim();
-    data.title = rawTitle;
+    data.title = h1 ? h1.innerText.trim() : '';
 
-    // Price: try multiple patterns
-    let price = null;
-    // Pattern 1: $XX,XXX FOB
-    const p1 = text.match(/\\$\\s*([\\d,]+)\\s*FOB/i);
-    if (p1) price = parseInt(p1[1].replace(/,/g, ''), 10);
-    // Pattern 2: FOB Price: $XX,XXX  or  FOB Price$XX,XXX
-    if (!price) {
-        const p2 = text.match(/FOB\\s*Price[:\\s]*\\$\\s*([\\d,]+)/i);
-        if (p2) price = parseInt(p2[1].replace(/,/g, ''), 10);
-    }
-    // Pattern 3: any $XX,XXX on the page (at least 4 digits = real price)
-    if (!price) {
-        const p3 = text.match(/\\$\\s*([\\d,]{4,})/);
-        if (p3) price = parseInt(p3[1].replace(/,/g, ''), 10);
-    }
-    data.price_usd = price;
+    // Price
+    const priceMatch = text.match(/\\$([\\d,]+)\\s*FOB/i);
+    data.price_usd = priceMatch ? parseInt(priceMatch[1].replace(/,/g, ''), 10) : null;
 
-    // Grade: extract single letter
-    let grade = '';
-    const gradeMatch = text.match(/Grade[\\s\\S]*?([SABCD])\\b/i);
-    if (gradeMatch) {
-        grade = gradeMatch[1].toUpperCase();
+    // Grade
+    const gradeEl = document.querySelector('[class*="grade" i], [class*="Grade"]');
+    if (gradeEl) {
+        data.grade = (gradeEl.innerText || '').trim().replace(/^Grade\\s*/i, '');
+    } else {
+        const gm = text.match(/Grade\\s*([ABCDS])/i);
+        data.grade = gm ? gm[1].toUpperCase() : '';
     }
-    data.grade = grade;
 
     // Item number
     const itemMatch = text.match(/Item\\s*(?:No|Number)[.:]*\\s*([a-z0-9]+)/i);
@@ -151,87 +136,99 @@ EXTRACT_DETAIL_JS = """() => {
     const vinMatch = text.match(/VIN[.:]*\\s*([A-Z0-9*]{10,17})/i);
     data.vin = vinMatch ? vinMatch[1] : '';
 
-    // Specs: parse from lines (page renders as label\nvalue\nlabel\nvalue)
+    // Specs: find all label-value pairs
     data.specs = {};
-    const lines = text.split('\\n').map(l => l.trim()).filter(l => l);
-    for (let i = 0; i < lines.length - 1; i++) {
-        const label = lines[i];
-        const value = lines[i + 1];
-        if (!value || value.length > 200) continue;
-        const map = {
-            'Mfg. Date': 'mfg_date', 'Manufacturing Date': 'mfg_date',
-            'Mfg. Year': 'mfg_date', 'Mfg Date': 'mfg_date',
-            '1st Reg. Year': 'reg_date', '1st Registration': 'reg_date',
-            'First Registration': 'reg_date',
-            'Mileage': 'mileage',
-            'Body Style': 'body_style',
-            'Exterior Color': 'color',
-            'Seats': 'seats', 'Seat': 'seats',
-            'Doors': 'doors', 'Door': 'doors',
-            'Engine': 'engine_model', 'Engine Model': 'engine_model',
-            'Displacement': 'displacement',
-            'Cylinder Arrangement': 'cylinder_arrangement',
-            'Number of Cylinders': 'num_cylinders',
-            'Valves per Cylinder': 'valves_per_cylinder',
-            'Valve Train': 'valve_train',
-            'Horsepower (ps)': 'horsepower', 'Max Horsepower': 'horsepower',
-            'Horsepower': 'horsepower',
-            'Max Power': 'max_power_kw', 'Power': 'max_power_kw',
-            'Max Power Speed': 'power_rpm',
-            'Max Torque': 'torque', 'Torque': 'torque',
-            'Max Torque Speed': 'torque_rpm',
-            'Transmission': 'transmission',
-            'Drive Train': 'drive_type', 'Drive Type': 'drive_type',
-            'Fuel Type': 'fuel_type', 'Fuel': 'fuel_type',
-            'Dimension (mm)': 'dimensions', 'Dimensions': 'dimensions',
-            'Curb Weight': 'curb_weight', 'Curb Weight (kg)': 'curb_weight',
-            'Steering': 'steering',
-            'Current Location': 'location', 'Location': 'location',
-            'Seller Type': 'seller_type',
-            'Port': 'port',
-            'Battery Capacity (kWh)': 'battery_capacity',
-            'Battery Capacity': 'battery_capacity',
-            'EV Range (km)': 'ev_range', 'EV Range': 'ev_range',
-            'Range (NEDC)': 'ev_range', 'Range (CLTC)': 'ev_range',
-            'Energy Consumption': 'energy_consumption',
-            'Fuel Consumption': 'fuel_consumption',
-            'Total Motor Power': 'total_motor_power',
-            'Total Motor Torque': 'total_motor_torque',
-            'Front Motor Power': 'front_motor_power',
-            'Front Motor Torque': 'front_motor_torque',
-            'Rear Motor Power': 'rear_motor_power',
-            'Rear Motor Max Power': 'rear_motor_power',
-            'Rear Motor Torque': 'rear_motor_torque',
-            'Rear Motor Max Torque': 'rear_motor_torque',
-            'Slow Charging Time': 'slow_charge_time',
-            'Fast Charging Time': 'fast_charge_time',
-        };
-        const key = map[label];
-        if (key && !data.specs[key]) {
-            data.specs[key] = value;
+    // Try structured spec rows first
+    const rows = document.querySelectorAll('tr, [class*="spec-row"], [class*="detail-item"]');
+    for (const row of rows) {
+        const cells = row.querySelectorAll('td, th, span, div');
+        if (cells.length >= 2) {
+            const label = (cells[0].innerText || '').trim().replace(/:$/, '');
+            const value = (cells[1].innerText || '').trim();
+            if (label && value && label.length < 50 && value.length < 200) {
+                data.specs[label] = value;
+            }
         }
     }
 
-    // Regex fallback for horsepower if line parser missed it
-    if (!data.specs['horsepower']) {
-        const hpM = text.match(/Horsepower.*?(\\d+\\.?\\d*)\\s*ps/i);
-        if (hpM) data.specs['horsepower'] = hpM[1] + ' ps';
+    // Fallback: parse labeled pairs from text
+    const pairPatterns = [
+        /Mfg\\.?\\s*(?:Year|Date)[.:]*\\s*([\\d.]+)/i,
+        /1st\\s*Reg(?:istration)?[.:]*\\s*([\\d.]+)/i,
+        /Mileage[.:]*\\s*([\\d,]+\\s*km)/i,
+        /Body\\s*Style[.:]*\\s*(\\w[\\w\\s-]*)/i,
+        /Exterior\\s*Color[.:]*\\s*([\\w\\s]+?)(?:\\s*$|\\s*\\n)/i,
+        /Seats?[.:]*\\s*(\\d+)/i,
+        /Doors?[.:]*\\s*(\\d+)/i,
+        /Engine(?:\\s*Model)?[.:]*\\s*([\\w\\d.]+[^\\n]{0,50})/i,
+        /Displacement[.:]*\\s*([\\d.]+\\s*[LT])/i,
+        /Cylinder[^:]*Arrangement[.:]*\\s*(\\w+)/i,
+        /Number\\s*of\\s*Cylinders?[.:]*\\s*(\\d+)/i,
+        /Valves?\\s*(?:per\\s*)?(?:Cylinder)?[.:]*\\s*(\\d+)/i,
+        /Valve\\s*Train[.:]*\\s*(\\w+)/i,
+        /(?:Max\\s*)?Horsepower[.:]*\\s*([\\d.]+\\s*ps)/i,
+        /(?:Max\\s*)?Power[.:]*\\s*([\\d.]+\\s*kW)/i,
+        /(?:Max\\s*)?Power\\s*Speed[.:]*\\s*([\\d-]+\\s*rpm)/i,
+        /(?:Max\\s*)?Torque[.:]*\\s*([\\d.]+\\s*N[·.]m)/i,
+        /(?:Max\\s*)?Torque\\s*Speed[.:]*\\s*([\\d-]+\\s*rpm)/i,
+        /Transmission[.:]*\\s*(\\w[\\w\\s()-]*)/i,
+        /Drive\\s*(?:Train|Type)[.:]*\\s*([^\\n]{3,50})/i,
+        /Fuel\\s*(?:Type)?[.:]*\\s*(\\w[\\w\\s-]*)/i,
+        /Dimensions?[.:]*\\s*([\\d×x\\s]+mm)/i,
+        /Curb\\s*Weight[.:]*\\s*([\\d,]+\\s*kg)/i,
+        /Steering[.:]*\\s*(Left|Right)[^\\n]*/i,
+        /(?:Current\\s*)?Location[.:]*\\s*([^\\n]+)/i,
+        /Seller\\s*(?:Type)?[.:]*\\s*(Individual|Certified|Dealer)[^\\n]*/i,
+        /Port[.:]*\\s*(\\w[\\w\\s]*)/i,
+        // EV / battery fields
+        /Battery\\s*Capacity[.:]*\\s*([\\d.]+\\s*kWh)/i,
+        /(?:EV\\s*)?Range\\s*\\(?(?:NEDC|CLTC|WLTP)?\\)?[.:]*\\s*([\\d,]+\\s*km)/i,
+        /Energy\\s*Consumption[.:]*\\s*([\\d.]+\\s*kWh\\/100km)/i,
+        /(?:WLTC|NEDC)?\\s*(?:Combined\\s*)?Fuel\\s*Consumption[.:]*\\s*([\\d.]+\\s*L\\/100km)/i,
+        /Total\\s*Motor\\s*Power[.:]*\\s*([\\d.]+\\s*kW)/i,
+        /Total\\s*Motor\\s*Torque[.:]*\\s*([\\d.]+\\s*N[·.]m)/i,
+        /(?:Front|Rear)\\s*Motor\\s*(?:Max\\s*)?Power[.:]*\\s*([\\d.]+\\s*kW)/i,
+        /(?:Front|Rear)\\s*Motor\\s*(?:Max\\s*)?Torque[.:]*\\s*([\\d.]+\\s*N[·.]m)/i,
+        /(?:Slow|AC)\\s*Charg(?:ing|e)\\s*Time[.:]*\\s*([\\d.]+\\s*h)/i,
+        /(?:Fast|DC)\\s*Charg(?:ing|e)\\s*Time[.:]*\\s*([\\d.]+\\s*(?:h|min))/i,
+    ];
+    const labels = [
+        'mfg_date', 'reg_date', 'mileage', 'body_style', 'color',
+        'seats', 'doors', 'engine_model', 'displacement', 'cylinder_arrangement',
+        'num_cylinders', 'valves_per_cylinder', 'valve_train',
+        'horsepower', 'max_power_kw', 'power_rpm',
+        'torque', 'torque_rpm',
+        'transmission', 'drive_type', 'fuel_type',
+        'dimensions', 'curb_weight', 'steering', 'location',
+        'seller_type', 'port',
+        'battery_capacity', 'ev_range', 'energy_consumption',
+        'fuel_consumption', 'total_motor_power', 'total_motor_torque',
+        'rear_motor_power', 'rear_motor_torque',
+        'slow_charge_time', 'fast_charge_time',
+    ];
+    for (let i = 0; i < pairPatterns.length; i++) {
+        const m = text.match(pairPatterns[i]);
+        if (m && !data.specs[labels[i]]) {
+            data.specs[labels[i]] = m[1].trim();
+        }
     }
-    if (!data.specs['max_power_kw']) {
-        const kwM = text.match(/Power.*?(\\d+\\.?\\d*)\\s*kW/i);
-        if (kwM) data.specs['max_power_kw'] = kwM[1] + ' kW';
-    }
+
+    // Front motor (separate from rear)
+    const fmPower = text.match(/Front\\s*Motor\\s*(?:Max\\s*)?Power[.:]*\\s*([\\d.]+\\s*kW)/i);
+    const fmTorque = text.match(/Front\\s*Motor\\s*(?:Max\\s*)?Torque[.:]*\\s*([\\d.]+\\s*N[·.]m)/i);
+    if (fmPower) data.specs['front_motor_power'] = fmPower[1].trim();
+    if (fmTorque) data.specs['front_motor_torque'] = fmTorque[1].trim();
 
     // Inspection scores (with denominators)
     data.inspection = {};
     const inspPairs = [
-        /Exterior\\s*(?:Design)?[.:]*\\s*(\\d+)(?:[/](\\d+))?/i,
-        /Interior\\s*(?:Trim)?[.:]*\\s*(\\d+)(?:[/](\\d+))?/i,
-        /Configuration\\s*(?:Features)?[.:]*\\s*(\\d+)(?:[/](\\d+))?/i,
-        /Structural\\s*(?:Components)?[.:]*\\s*(\\d+)(?:[/](\\d+))?/i,
-        /Reinforcement\\s*(?:Parts)?[.:]*\\s*(\\d+)(?:[/](\\d+))?/i,
-        /Cockpit\\s*(?:Conditions)?[.:]*\\s*(\\d+)(?:[/](\\d+))?/i,
-        /New\\s*Energy[.:]*\\s*(\\d+)(?:[/](\\d+))?/i,
+        /Exterior\\s*(?:Design)?[.:]*\\s*(\\d+)(?:[/\\\\](\\d+))?/i,
+        /Interior\\s*(?:Trim)?[.:]*\\s*(\\d+)(?:[/\\\\](\\d+))?/i,
+        /Configuration\\s*(?:Features)?[.:]*\\s*(\\d+)(?:[/\\\\](\\d+))?/i,
+        /Structural\\s*(?:Components)?[.:]*\\s*(\\d+)(?:[/\\\\](\\d+))?/i,
+        /Reinforcement\\s*(?:Parts)?[.:]*\\s*(\\d+)(?:[/\\\\](\\d+))?/i,
+        /Cockpit\\s*(?:Conditions)?[.:]*\\s*(\\d+)(?:[/\\\\](\\d+))?/i,
+        /New\\s*Energy[.:]*\\s*(\\d+)(?:[/\\\\](\\d+))?/i,
     ];
     const inspLabels = [
         'exterior', 'interior', 'configuration',
@@ -251,22 +248,17 @@ EXTRACT_DETAIL_JS = """() => {
     data.no_water = text.includes('No Water');
     data.no_fire = text.includes('No Fire');
 
-    // Photos: only real car images (jpg from guazistatic), skip gif/png icons
+    // Photos
     data.photos = [];
-    const imgs = document.querySelectorAll('img');
+    const imgs = document.querySelectorAll('img[src*="guazi"], img[src*="image-public"]');
     const seenUrls = new Set();
     for (const img of imgs) {
         const src = img.src || img.getAttribute('data-src') || '';
         if (!src || seenUrls.has(src)) continue;
-        // Must be from guazi CDN
-        if (!src.includes('guazistatic') && !src.includes('image-oversea')) continue;
-        // Skip icons, badges, gifs, tiny pngs
-        if (src.includes('icon') || src.includes('logo') || src.includes('flag')
-            || src.includes('assets/') || src.endsWith('.gif')) continue;
-        // Keep jpg car photos + large pngs (inspection reports)
-        const base = src.split('?')[0];
-        if (seenUrls.has(base)) continue;
-        seenUrls.add(base);
+        // Skip tiny UI icons
+        if (src.includes('icon') || src.includes('logo') || src.includes('flag')) continue;
+        const w = img.naturalWidth || img.width || 0;
+        if (w > 0 && w < 50) continue;
         seenUrls.add(src);
         data.photos.push(src);
     }
@@ -281,6 +273,7 @@ EXTRACT_DETAIL_JS = """() => {
         if (t && t.length < 100) data.features.push(t);
     }
 
+    data._raw_text = text;
     return data;
 }"""
 
@@ -340,6 +333,57 @@ def parse_dimensions(s: str | None) -> tuple[int | None, int | None, int | None]
     return None, None, None
 
 
+SPEC_LINE_MAP = {
+    "Mfg. Date": "mfg_date", "Manufacturing Date": "mfg_date",
+    "Mfg. Year": "mfg_date", "Mfg Date": "mfg_date",
+    "1st Reg. Year": "reg_date", "1st Registration": "reg_date",
+    "Mileage": "mileage", "Body Style": "body_style",
+    "Exterior Color": "color", "Seats": "seats", "Doors": "doors",
+    "Engine": "engine_model", "Displacement": "displacement",
+    "Cylinder Arrangement": "cylinder_arrangement",
+    "Number of Cylinders": "num_cylinders",
+    "Valves per Cylinder": "valves_per_cylinder",
+    "Valve Train": "valve_train",
+    "Horsepower (ps)": "horsepower", "Horsepower": "horsepower",
+    "Max Power": "max_power_kw",
+    "Max Power Speed": "power_rpm",
+    "Max Torque": "torque", "Torque": "torque",
+    "Max Torque Speed": "torque_rpm",
+    "Transmission": "transmission",
+    "Drive Train": "drive_type", "Drive Type": "drive_type",
+    "Fuel Type": "fuel_type",
+    "Dimension (mm)": "dimensions", "Curb Weight (kg)": "curb_weight",
+    "Curb Weight": "curb_weight", "Steering": "steering",
+    "Current Location": "location", "Location": "location",
+    "Seller Type": "seller_type", "Port": "port",
+    "Battery Capacity (kWh)": "battery_capacity",
+    "Battery Capacity": "battery_capacity",
+    "EV Range (km)": "ev_range", "EV Range": "ev_range",
+    "Energy Consumption": "energy_consumption",
+    "Fuel Consumption": "fuel_consumption",
+    "Total Motor Power": "total_motor_power",
+    "Total Motor Torque": "total_motor_torque",
+    "Front Motor Power": "front_motor_power",
+    "Rear Motor Power": "rear_motor_power",
+    "Rear Motor Max Power": "rear_motor_power",
+    "Rear Motor Torque": "rear_motor_torque",
+    "Rear Motor Max Torque": "rear_motor_torque",
+    "Slow Charging Time": "slow_charge_time",
+    "Fast Charging Time": "fast_charge_time",
+}
+
+
+def _parse_spec_lines(raw_text: str) -> dict[str, str]:
+    """Parse label/value pairs from page text (label\\nvalue\\nlabel\\nvalue)."""
+    lines = [l.strip() for l in raw_text.split("\n") if l.strip()]
+    result: dict[str, str] = {}
+    for i in range(len(lines) - 1):
+        key = SPEC_LINE_MAP.get(lines[i])
+        if key and key not in result:
+            result[key] = lines[i + 1]
+    return result
+
+
 def extract_brand_series(title: str, slug_brand_series: str) -> tuple[str, str, str]:
     """Extract brand and series/model from the English title."""
     title = re.sub(r"^Used\s+", "", title, flags=re.IGNORECASE).strip()
@@ -387,6 +431,24 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
         return None
 
     specs = detail.get("specs", {})
+
+    # Clean specs: tr/td extraction grabs multiline values like "AT\nEngine\n3"
+    # Keep only the first line of each spec value
+    for k in list(specs.keys()):
+        v = specs[k]
+        if isinstance(v, str) and "\n" in v:
+            specs[k] = v.split("\n")[0].strip()
+
+    # Parse specs from text lines if tr/td extraction missed them
+    text = detail.get("_text", "")
+    if not text:
+        text = detail.get("title", "")
+    raw_text = detail.get("_raw_text", "")
+    if raw_text:
+        line_specs = _parse_spec_lines(raw_text)
+        for k, v in line_specs.items():
+            if k not in specs or not specs[k]:
+                specs[k] = v
 
     # Brand / series / complectation
     slug_brand_series = parsed["brand_series_slug"] if parsed else ""
