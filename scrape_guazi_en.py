@@ -742,6 +742,11 @@ def scrape_batch(rows: list[dict]) -> list[tuple[str, bool, str]]:
                 results.append((item_id, False, "parse failed"))
                 continue
             ok = DB.upsert_car(rec)
+            if not ok:
+                problem_fields = {k: repr(v)[:80] for k, v in rec.items()
+                                  if v is not None and k not in
+                                  ("images", "source_data", "url", "title", "complectation")}
+                print(f"  FAIL {item_id}: {problem_fields}", flush=True)
             results.append((item_id, ok, ""))
     finally:
         ctx.__exit__(None, None, None)
