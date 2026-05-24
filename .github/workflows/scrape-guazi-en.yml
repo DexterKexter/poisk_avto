@@ -1,28 +1,35 @@
-name: Scrape guazi (EN export)
+name: Scrape guazi EN
 
 on:
+  schedule:
+    - cron: '45 */3 * * *'
   workflow_dispatch:
     inputs:
       brands:
-        description: 'CSV of brand names (empty = all from DB)'
         required: false
         default: ''
-      max_pages:
-        description: 'Max listing pages per brand'
+        description: 'Comma-separated brand slugs (empty = auto-discover)'
+      max_pages_per_brand:
         required: false
-        default: '10'
+        default: '50'
       min_year:
         required: false
-        default: '2018'
+        default: '2015'
       max_mileage_km:
         required: false
         default: '200000'
-      collect_limit:
-        required: false
-        default: '15000'
-      scrape_limit:
+      min_price_usd:
         required: false
         default: '500'
+      collect_limit:
+        required: false
+        default: '20000'
+      scrape_limit:
+        required: false
+        default: '3000'
+      workers:
+        required: false
+        default: '4'
 
 concurrency:
   group: scrape-guazi-en
@@ -31,7 +38,9 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 350
+    env:
+      GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,22 +52,28 @@ jobs:
           pip install playwright
           python -m playwright install chromium --with-deps
 
-      - name: Collect listings from en.guazi.com
+      - name: Collect listings (en.guazi.com)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GUAZI_EMAIL: ${{ secrets.GUAZI_EMAIL }}
+          GUAZI_PASSWORD: ${{ secrets.GUAZI_PASSWORD }}
         run: |
           python collect_guazi_en.py \
-            --brands         "${{ inputs.brands || '' }}" \
-            --max-pages      ${{ inputs.max_pages      || 10 }} \
-            --min-year       ${{ inputs.min_year       || 2018 }} \
-            --max-mileage-km ${{ inputs.max_mileage_km || 200000 }} \
-            --limit          ${{ inputs.collect_limit  || 15000 }}
+            --brands             "${{ inputs.brands             || '' }}" \
+            --max-pages-per-brand ${{ inputs.max_pages_per_brand || 50 }} \
+            --min-year            ${{ inputs.min_year            || 2015 }} \
+            --max-mileage-km      ${{ inputs.max_mileage_km     || 200000 }} \
+            --min-price-usd       ${{ inputs.min_price_usd      || 500 }} \
+            --limit               ${{ inputs.collect_limit      || 20000 }}
 
       - name: Scrape detail pages
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GUAZI_EMAIL: ${{ secrets.GUAZI_EMAIL }}
+          GUAZI_PASSWORD: ${{ secrets.GUAZI_PASSWORD }}
         run: |
           python scrape_guazi_en.py \
-            --limit ${{ inputs.scrape_limit || 500 }}
+            --limit   ${{ inputs.scrape_limit || 3000 }} \
+            --workers ${{ inputs.workers      || 4 }}
