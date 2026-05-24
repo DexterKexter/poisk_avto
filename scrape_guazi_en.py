@@ -689,13 +689,16 @@ def fetch_detail(url: str, page=None) -> dict | None:
 
         html = page.content()
         if len(html) < 3000:
+            print(f"    short HTML ({len(html)} chars) at {url[:60]}", flush=True)
             return None
         if "captcha" in page.url.lower():
+            print(f"    captcha at {page.url[:60]}", flush=True)
             return None
 
         detail = page.evaluate(EXTRACT_DETAIL_JS)
         return detail
-    except Exception:
+    except Exception as e:
+        print(f"    fetch error: {e}", flush=True)
         return None
 
 
@@ -728,6 +731,7 @@ def scrape_batch(rows: list[dict]) -> list[tuple[str, bool, str]]:
             detail = fetch_detail(url, page)
             if not detail:
                 fail_streak += 1
+                print(f"  {item_id}: fetch failed ({url[:80]})", flush=True)
                 results.append((item_id, False, "fetch failed"))
                 if fail_streak >= 3:
                     ctx.__exit__(None, None, None)
@@ -739,6 +743,7 @@ def scrape_batch(rows: list[dict]) -> list[tuple[str, bool, str]]:
 
             rec = build_record(detail, meta, item_id)
             if not rec:
+                print(f"  {item_id}: parse failed (title={detail.get('title','')[:50]!r})", flush=True)
                 results.append((item_id, False, "parse failed"))
                 continue
             ok = DB.upsert_car(rec)
