@@ -1,0 +1,20 @@
+name: Test guazi EN login
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          pip install requests playwright
+          python -m playwright install chromium --with-deps
+      - name: Test login + listings
+        env:
+          GUAZI_EMAIL: ${{ secrets.GUAZI_EMAIL }}
+          GUAZI_PASSWORD: ${{ secrets.GUAZI_PASSWORD }}
+        run: python test_guazi_login.py
