@@ -166,60 +166,73 @@ EXTRACT_DETAIL_JS = """() => {
         }
     }
 
-    // Fallback: parse labeled pairs from text
+    // Fallback: parse specs from lines (page renders as label\nvalue\nlabel\nvalue)
+    const lines = text.split('\\n').map(l => l.trim()).filter(l => l);
+    for (let i = 0; i < lines.length - 1; i++) {
+        const label = lines[i];
+        const value = lines[i + 1];
+        if (!value || value.length > 200) continue;
+        const map = {
+            'Mfg. Date': 'mfg_date', 'Manufacturing Date': 'mfg_date',
+            'Mfg. Year': 'mfg_date', 'Mfg Date': 'mfg_date',
+            '1st Reg. Year': 'reg_date', '1st Registration': 'reg_date',
+            'First Registration': 'reg_date',
+            'Mileage': 'mileage',
+            'Body Style': 'body_style',
+            'Exterior Color': 'color',
+            'Seats': 'seats', 'Seat': 'seats',
+            'Doors': 'doors', 'Door': 'doors',
+            'Engine': 'engine_model', 'Engine Model': 'engine_model',
+            'Displacement': 'displacement',
+            'Cylinder Arrangement': 'cylinder_arrangement',
+            'Number of Cylinders': 'num_cylinders',
+            'Valves per Cylinder': 'valves_per_cylinder',
+            'Valve Train': 'valve_train',
+            'Horsepower (ps)': 'horsepower', 'Max Horsepower': 'horsepower',
+            'Horsepower': 'horsepower',
+            'Max Power': 'max_power_kw', 'Power': 'max_power_kw',
+            'Max Power Speed': 'power_rpm',
+            'Max Torque': 'torque', 'Torque': 'torque',
+            'Max Torque Speed': 'torque_rpm',
+            'Transmission': 'transmission',
+            'Drive Train': 'drive_type', 'Drive Type': 'drive_type',
+            'Fuel Type': 'fuel_type', 'Fuel': 'fuel_type',
+            'Dimension (mm)': 'dimensions', 'Dimensions': 'dimensions',
+            'Curb Weight': 'curb_weight', 'Curb Weight (kg)': 'curb_weight',
+            'Steering': 'steering',
+            'Current Location': 'location', 'Location': 'location',
+            'Seller Type': 'seller_type',
+            'Port': 'port',
+            'Battery Capacity (kWh)': 'battery_capacity',
+            'Battery Capacity': 'battery_capacity',
+            'EV Range (km)': 'ev_range', 'EV Range': 'ev_range',
+            'Range (NEDC)': 'ev_range', 'Range (CLTC)': 'ev_range',
+            'Energy Consumption': 'energy_consumption',
+            'Fuel Consumption': 'fuel_consumption',
+            'Total Motor Power': 'total_motor_power',
+            'Total Motor Torque': 'total_motor_torque',
+            'Front Motor Power': 'front_motor_power',
+            'Front Motor Torque': 'front_motor_torque',
+            'Rear Motor Power': 'rear_motor_power',
+            'Rear Motor Max Power': 'rear_motor_power',
+            'Rear Motor Torque': 'rear_motor_torque',
+            'Rear Motor Max Torque': 'rear_motor_torque',
+            'Slow Charging Time': 'slow_charge_time',
+            'Fast Charging Time': 'fast_charge_time',
+        };
+        const key = map[label];
+        if (key && !data.specs[key]) {
+            data.specs[key] = value;
+        }
+    }
+
+    // Legacy regex fallback for fields the line parser might miss
     const pairPatterns = [
-        /Mfg\\.?\\s*(?:Year|Date)[.:]*\\s*([\\d.]+)/i,
-        /1st\\s*Reg(?:istration)?[.:]*\\s*([\\d.]+)/i,
-        /Mileage[.:]*\\s*([\\d,]+\\s*km)/i,
-        /Body\\s*Style[.:]*\\s*(\\w[\\w\\s-]*)/i,
-        /Exterior\\s*Color[.:]*\\s*([\\w\\s]+?)(?:\\s*$|\\s*\\n)/i,
-        /Seats?[.:]*\\s*(\\d+)/i,
-        /Doors?[.:]*\\s*(\\d+)/i,
-        /Engine(?:\\s*Model)?[.:]*\\s*([\\w\\d.]+[^\\n]{0,50})/i,
-        /Displacement[.:]*\\s*([\\d.]+\\s*[LT])/i,
-        /Cylinder[^:]*Arrangement[.:]*\\s*(\\w+)/i,
-        /Number\\s*of\\s*Cylinders?[.:]*\\s*(\\d+)/i,
-        /Valves?\\s*(?:per\\s*)?(?:Cylinder)?[.:]*\\s*(\\d+)/i,
-        /Valve\\s*Train[.:]*\\s*(\\w+)/i,
-        /(?:Max\\s*)?Horsepower[.:]*\\s*([\\d.]+\\s*ps)/i,
-        /(?:Max\\s*)?Power[.:]*\\s*([\\d.]+\\s*kW)/i,
-        /(?:Max\\s*)?Power\\s*Speed[.:]*\\s*([\\d-]+\\s*rpm)/i,
-        /(?:Max\\s*)?Torque[.:]*\\s*([\\d.]+\\s*N[·.]m)/i,
-        /(?:Max\\s*)?Torque\\s*Speed[.:]*\\s*([\\d-]+\\s*rpm)/i,
-        /Transmission[.:]*\\s*(\\w[\\w\\s()-]*)/i,
-        /Drive\\s*(?:Train|Type)[.:]*\\s*([^\\n]{3,50})/i,
-        /Fuel\\s*(?:Type)?[.:]*\\s*(\\w[\\w\\s-]*)/i,
-        /Dimensions?[.:]*\\s*([\\d×x\\s]+mm)/i,
-        /Curb\\s*Weight[.:]*\\s*([\\d,]+\\s*kg)/i,
-        /Steering[.:]*\\s*(Left|Right)[^\\n]*/i,
-        /(?:Current\\s*)?Location[.:]*\\s*([^\\n]+)/i,
-        /Seller\\s*(?:Type)?[.:]*\\s*(Individual|Certified|Dealer)[^\\n]*/i,
-        /Port[.:]*\\s*(\\w[\\w\\s]*)/i,
-        // EV / battery fields
-        /Battery\\s*Capacity[.:]*\\s*([\\d.]+\\s*kWh)/i,
-        /(?:EV\\s*)?Range\\s*\\(?(?:NEDC|CLTC|WLTP)?\\)?[.:]*\\s*([\\d,]+\\s*km)/i,
-        /Energy\\s*Consumption[.:]*\\s*([\\d.]+\\s*kWh\\/100km)/i,
-        /(?:WLTC|NEDC)?\\s*(?:Combined\\s*)?Fuel\\s*Consumption[.:]*\\s*([\\d.]+\\s*L\\/100km)/i,
-        /Total\\s*Motor\\s*Power[.:]*\\s*([\\d.]+\\s*kW)/i,
-        /Total\\s*Motor\\s*Torque[.:]*\\s*([\\d.]+\\s*N[·.]m)/i,
-        /(?:Front|Rear)\\s*Motor\\s*(?:Max\\s*)?Power[.:]*\\s*([\\d.]+\\s*kW)/i,
-        /(?:Front|Rear)\\s*Motor\\s*(?:Max\\s*)?Torque[.:]*\\s*([\\d.]+\\s*N[·.]m)/i,
-        /(?:Slow|AC)\\s*Charg(?:ing|e)\\s*Time[.:]*\\s*([\\d.]+\\s*h)/i,
-        /(?:Fast|DC)\\s*Charg(?:ing|e)\\s*Time[.:]*\\s*([\\d.]+\\s*(?:h|min))/i,
+        /Horsepower[^\\n]*?(\\d+[\\d.]*\\s*ps)/i,
+        /(?:Max\\s*)?Power[^\\n]*?(\\d+[\\d.]*\\s*kW)/i,
     ];
     const labels = [
-        'mfg_date', 'reg_date', 'mileage', 'body_style', 'color',
-        'seats', 'doors', 'engine_model', 'displacement', 'cylinder_arrangement',
-        'num_cylinders', 'valves_per_cylinder', 'valve_train',
-        'horsepower', 'max_power_kw', 'power_rpm',
-        'torque', 'torque_rpm',
-        'transmission', 'drive_type', 'fuel_type',
-        'dimensions', 'curb_weight', 'steering', 'location',
-        'seller_type', 'port',
-        'battery_capacity', 'ev_range', 'energy_consumption',
-        'fuel_consumption', 'total_motor_power', 'total_motor_torque',
-        'rear_motor_power', 'rear_motor_torque',
-        'slow_charge_time', 'fast_charge_time',
+        'horsepower', 'max_power_kw',
     ];
     for (let i = 0; i < pairPatterns.length; i++) {
         const m = text.match(pairPatterns[i]);
@@ -227,12 +240,6 @@ EXTRACT_DETAIL_JS = """() => {
             data.specs[labels[i]] = m[1].trim();
         }
     }
-
-    // Front motor (separate from rear)
-    const fmPower = text.match(/Front\\s*Motor\\s*(?:Max\\s*)?Power[.:]*\\s*([\\d.]+\\s*kW)/i);
-    const fmTorque = text.match(/Front\\s*Motor\\s*(?:Max\\s*)?Torque[.:]*\\s*([\\d.]+\\s*N[·.]m)/i);
-    if (fmPower) data.specs['front_motor_power'] = fmPower[1].trim();
-    if (fmTorque) data.specs['front_motor_torque'] = fmTorque[1].trim();
 
     // Inspection scores (with denominators)
     data.inspection = {};
