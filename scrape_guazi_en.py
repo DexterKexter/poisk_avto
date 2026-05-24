@@ -21,7 +21,7 @@ import db as DB
 
 sys.stdout.reconfigure(line_buffering=True)
 
-SOURCE = "guazi"
+SOURCE = "guazi-en"
 BASE_URL = "https://en.guazi.com"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")

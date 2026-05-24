@@ -23,7 +23,7 @@ import db as DB
 
 sys.stdout.reconfigure(line_buffering=True)
 
-SOURCE = "guazi"
+SOURCE = "guazi-en"
 BASE_URL = "https://en.guazi.com"
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
@@ -172,10 +172,12 @@ def extract_cards(page) -> list[dict]:
 def collect_brand(page, mark: str, slug: str, max_pages: int,
                   min_year: int, min_price: int, max_mileage_km: int) -> list[dict]:
     collected = []
+    # vehicleSourceClassificationCustomers=180003,180002 is required for
+    # listings to render (Guazi Owned + Certified Deal sources).
+    LISTING_PARAMS = ("?vehicleSourceClassificationCustomers=180003%2C180002"
+                      "&detectionLevels=S%2CA%2CB")
     for pg in range(1, max_pages + 1):
-        url = f"{BASE_URL}/used-cars/{slug}/"
-        if pg > 1:
-            url = f"{BASE_URL}/used-cars/{slug}/page{pg}/"
+        url = f"{BASE_URL}/used-cars/{slug}/{LISTING_PARAMS}&page={pg}"
         try:
             page.goto(url, wait_until="networkidle", timeout=45_000)
             page.wait_for_timeout(4000)
