@@ -82,3 +82,10 @@ jobs:
           python scrape_guazi_en.py \
             --limit   ${{ inputs.scrape_limit || 3000 }} \
             --workers ${{ inputs.workers      || 4 }}
+
+      - name: Mirror images to Supabase Storage
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python mirror_images.py --source guazi_en --workers 8
