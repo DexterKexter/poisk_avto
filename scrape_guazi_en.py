@@ -151,22 +151,8 @@ EXTRACT_DETAIL_JS = """() => {
     const vinMatch = text.match(/VIN[.:]*\\s*([A-Z0-9*]{10,17})/i);
     data.vin = vinMatch ? vinMatch[1] : '';
 
-    // Specs: find all label-value pairs
+    // Specs: parse from lines (page renders as label\nvalue\nlabel\nvalue)
     data.specs = {};
-    // Try structured spec rows first
-    const rows = document.querySelectorAll('tr, [class*="spec-row"], [class*="detail-item"]');
-    for (const row of rows) {
-        const cells = row.querySelectorAll('td, th, span, div');
-        if (cells.length >= 2) {
-            const label = (cells[0].innerText || '').trim().replace(/:$/, '');
-            const value = (cells[1].innerText || '').trim();
-            if (label && value && label.length < 50 && value.length < 200) {
-                data.specs[label] = value;
-            }
-        }
-    }
-
-    // Fallback: parse specs from lines (page renders as label\nvalue\nlabel\nvalue)
     const lines = text.split('\\n').map(l => l.trim()).filter(l => l);
     for (let i = 0; i < lines.length - 1; i++) {
         const label = lines[i];
