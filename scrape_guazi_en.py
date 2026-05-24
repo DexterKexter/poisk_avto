@@ -163,8 +163,14 @@ def scrape_one(ctx, source_id: str, meta: dict) -> dict | None:
     finally:
         page.close()
 
-    if not d or d.get("bodyLen", 0) < 500:
+    if not d:
+        print(f"  ! {source_id} extract returned None", flush=True)
         return None
+    if d.get("bodyLen", 0) < 500:
+        print(f"  ! {source_id} bodyLen={d.get('bodyLen')} (too short), url={url}", flush=True)
+        return None
+    print(f"  + {source_id} bodyLen={d.get('bodyLen')} photos={len(d.get('photos',[]))} "
+          f"price=${d.get('priceUsd')} grade={d.get('grade')}", flush=True)
 
     # Merge listing-page meta with detail-page data
     brand_model = meta.get("brand_model", "")
