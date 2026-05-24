@@ -1,0 +1,64 @@
+name: Scrape guazi (EN export)
+
+on:
+  workflow_dispatch:
+    inputs:
+      brands:
+        description: 'CSV of brand names (empty = all from DB)'
+        required: false
+        default: ''
+      max_pages:
+        description: 'Max listing pages per brand'
+        required: false
+        default: '10'
+      min_year:
+        required: false
+        default: '2018'
+      max_mileage_km:
+        required: false
+        default: '200000'
+      collect_limit:
+        required: false
+        default: '15000'
+      scrape_limit:
+        required: false
+        default: '500'
+
+concurrency:
+  group: scrape-guazi-en
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps + playwright
+        run: |
+          pip install -r requirements.txt
+          pip install playwright
+          python -m playwright install chromium --with-deps
+
+      - name: Collect listings from en.guazi.com
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python collect_guazi_en.py \
+            --brands         "${{ inputs.brands || '' }}" \
+            --max-pages      ${{ inputs.max_pages      || 10 }} \
+            --min-year       ${{ inputs.min_year       || 2018 }} \
+            --max-mileage-km ${{ inputs.max_mileage_km || 200000 }} \
+            --limit          ${{ inputs.collect_limit  || 15000 }}
+
+      - name: Scrape detail pages
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python scrape_guazi_en.py \
+            --limit ${{ inputs.scrape_limit || 500 }}
