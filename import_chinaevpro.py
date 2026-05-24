@@ -232,7 +232,6 @@ def parse_brand_page(slug: str, html: str) -> dict[str, Any]:
             "name": brand_name,
             "slug": slug,
             "logo_url": logo_url,
-            "description": description,
             "country": "China",
             "source": SOURCE,
             "source_url": f"{BASE_URL}/brands/{slug}",
