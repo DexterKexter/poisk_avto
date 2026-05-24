@@ -110,43 +110,75 @@ EXTRACT_CARDS_JS = """() => {
             if (text.length > 80 && text.length < 3000) break;
         }
 
-        const text = (card.innerText || '').replace(/\\n+/g, ' | ');
+        const text = (card.innerText || '');
+        const textFlat = text.replace(/\\n+/g, ' | ');
 
-        // Find grade badge (single letter A-D or S)
-        const gradeEl = card.querySelector('[class*="grade"], [class*="Grade"]');
+        // Grade: look for "Grade\\nS" or "Grade\\nA" pattern
         let grade = '';
-        if (gradeEl) {
-            grade = (gradeEl.innerText || '').trim();
+        const gradeMatch = text.match(/Grade\\s*\\n\\s*([SABCD])/);
+        if (gradeMatch) {
+            grade = gradeMatch[1];
         } else {
-            // Try to find standalone letter that's a grade
-            const gradeMatch = text.match(/\\b([ABCDS])\\b/);
-            if (gradeMatch) grade = gradeMatch[1];
+            const gradeEl = card.querySelector('[class*="grade" i]');
+            if (gradeEl) {
+                const gt = (gradeEl.innerText || '').replace(/Grade/i, '').trim();
+                if (gt.length === 1 && 'SABCD'.includes(gt)) grade = gt;
+            }
         }
 
-        // Find price
+        // Price: look for FOB Price pattern or $XX,XXX
         let price = null;
         const priceMatch = text.match(/\\$([\\d,]+)/);
         if (priceMatch) {
             price = parseInt(priceMatch[1].replace(/,/g, ''), 10);
         }
 
-        // Find image
-        const img = card.querySelector('img[src*="guazi"], img[src*="image"]');
-        const imgSrc = img ? (img.src || img.getAttribute('data-src') || '') : '';
-        const imgAlt = img ? (img.alt || '') : '';
+        // Title: find the link text or <img alt="Used ...">
+        // The product link itself or nearby heading usually has the car name
+        let title = '';
+        // Try: img alt attribute (often "Used BMW 3 Series 2021 ...")
+        const imgs = card.querySelectorAll('img');
+        for (const img of imgs) {
+            const alt = (img.alt || '').trim();
+            if (alt.startsWith('Used ')) {
+                title = alt.replace(/^Used /, '');
+                break;
+            }
+        }
+        // Fallback: find line that looks like a car name (contains year 20XX)
+        if (!title) {
+            const lines = text.split('\\n').map(l => l.trim()).filter(l => l.length > 10);
+            for (const line of lines) {
+                if (/\\b20[12]\\d\\b/.test(line) && !line.includes('$') && !line.includes('Grade')) {
+                    title = line.replace(/^Used /, '');
+                    break;
+                }
+            }
+        }
+
+        // Image: find car photo (not icons/badges)
+        let imgSrc = '';
+        for (const img of imgs) {
+            const src = img.src || img.getAttribute('data-src') || '';
+            if (src.includes('guazistatic.com') || (src.includes('image') && !src.includes('icon') && !src.includes('assets'))) {
+                imgSrc = src;
+                break;
+            }
+        }
 
         // Seller type
         let sellerType = '';
-        if (text.includes('Certified Dealer')) sellerType = 'dealer';
-        else if (text.includes('Individual')) sellerType = 'individual';
+        if (textFlat.includes('Certified Dealer')) sellerType = 'dealer';
+        else if (textFlat.includes('Guazi Owned')) sellerType = 'guazi_owned';
+        else if (textFlat.includes('Individual')) sellerType = 'individual';
 
         results.push({
             href: href,
-            text: text.substring(0, 500),
+            text: textFlat.substring(0, 500),
             grade: grade,
             price_usd: price,
             img_src: imgSrc,
-            img_alt: imgAlt,
+            img_alt: title,
             seller_type: sellerType,
         });
     }
@@ -249,13 +281,12 @@ def extract_cards_from_page(page) -> list[dict]:
         if not parsed:
             continue
 
-        # Title from image alt or card text
+        # Title from JS extraction, or build from slug
         title = raw.get("img_alt", "").replace("Used ", "", 1).strip()
-        if not title:
-            # First line of card text usually is the title
-            text = raw.get("text", "")
-            parts = text.split(" | ")
-            title = parts[0].strip() if parts else slug
+        if not title or title in ("Grade", "S", "A", "B", "C", "D"):
+            # Build readable title from slug: "bmw-3-series" → "BMW 3 Series"
+            brand_series = parsed["brand_series_slug"]
+            title = brand_series.replace("-", " ").title() + f" {parsed['year']}"
 
         cards.append({
             "item_id": parsed["item_id"],
