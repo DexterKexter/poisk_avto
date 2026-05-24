@@ -258,11 +258,11 @@ def main() -> None:
 
         def get_meta(sid: str) -> dict:
             r = DB._pg_request(
-                "GET", f"pending_ids?source=eq.{SOURCE}&source_id=eq.{sid}&select=meta")
+                "GET", f"pending_ids?source=eq.{SOURCE}&source_id=eq.{sid}&select=metadata")
             if r.status_code == 200:
                 rows = r.json()
-                if rows and rows[0].get("meta"):
-                    m = rows[0]["meta"]
+                if rows and rows[0].get("metadata"):
+                    m = rows[0]["metadata"]
                     return json.loads(m) if isinstance(m, str) else m
             return {}
 

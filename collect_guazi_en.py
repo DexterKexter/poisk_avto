@@ -263,7 +263,8 @@ def main() -> None:
                 ok = DB.upsert_pending({
                     "source": SOURCE,
                     "source_id": car["product_id"],
-                    "meta": meta,
+                    "metadata": car,
+                    "found_at": DB.now_iso(),
                 })
                 if ok:
                     saved += 1
