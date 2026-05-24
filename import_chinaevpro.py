@@ -297,26 +297,12 @@ def upsert_model(rec: dict) -> bool:
 
     r = DB._pg_request(
         "POST",
-        "models?on_conflict=slug",
+        "models?on_conflict=brand_id,slug,source",
         headers={"Prefer": "return=minimal,resolution=merge-duplicates"},
         json=rec,
     )
     if r.status_code in (200, 201, 204):
         return True
-
-    # Fallback: composite unique
-    if r.status_code in (400, 409):
-        r2 = DB._pg_request(
-            "POST",
-            "models?on_conflict=source,slug",
-            headers={"Prefer": "return=minimal,resolution=merge-duplicates"},
-            json=rec,
-        )
-        if r2.status_code in (200, 201, 204):
-            return True
-        print(f"  model upsert FAIL {r2.status_code}: {r2.text[:300]}")
-        return False
-
     print(f"  model upsert FAIL {r.status_code}: {r.text[:300]}")
     return False
 
