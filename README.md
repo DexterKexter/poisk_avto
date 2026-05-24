@@ -1,6 +1,6 @@
 # Poisk Avto — мульти-источник парсер автомобилей для импорта в КЗ
 
-Парсер объявлений с **4 источников** (3 китайских + 1 корейский), плюс каталог брендов, моделей и поколений. Цель — показать клиенту из Казахстана **готовые к ввозу** машины с реальными ценами, фото, VIN и историей проверок.
+Парсер объявлений с **5 источников** (3 китайских + 1 международный + 1 корейский), плюс каталог брендов, моделей и поколений. Цель — показать клиенту из Казахстана **готовые к ввозу** машины с реальными ценами, фото, VIN и историей проверок.
 
 База — Supabase Postgres. Парсеры — Python + GitHub Actions. **Стоимость инфры — $0/мес**.
 
@@ -40,18 +40,17 @@ poisk_avto/
 ├── mirror_images.py                # зеркалит autoimg.cn → Supabase Storage
 │
 ├── data/
-│   ├── model_generations.json      # 2516 поколений
-│   └── open_vehicle_db.json        # 69 брендов, справочник моделей
+│   └── model_generations.json      # 2516 поколений
 ├── migrations/
-│   └── 20260519_model_generations.sql
+│   ├── 20260519_model_generations.sql
+│   └── 20260524_guazi_en_columns.sql  # +27 колонок (inspection, EV, engine)
 │
 └── .github/workflows/
     ├── scrape-che168.yml           # */4h
     ├── scrape-guazi.yml            # */2h (Chinese)
-    ├── scrape-guazi-en.yml         # manual (EN export, в разработке)
+    ├── scrape-guazi-en.yml         # */3h (EN export, USD FOB)
     ├── scrape-encar.yml            # ежечасно (paused)
     ├── scrape-autocango.yml        # */12h
-    ├── import-brands.yml           # пн 22:00 UTC
     ├── import-model-specs.yml      # 1-е число месяца
     └── mirror-images.yml           # manual + post-step в che168
 ```
@@ -62,7 +61,7 @@ poisk_avto/
 |---|---|---|---|---|
 | **che168** | playwright | CN→EN (chinese_maps) | CNY | VIN + maintenance/insurance reports |
 | **guazi (CN)** | playwright + Oxylabs | CN→EN | CNY | inspection scorecard |
-| **guazi (EN)** | playwright | English | USD | Grade A-D, 60-84 фото, export-ready |
+| **guazi (EN)** | playwright | English | USD FOB | Grade A-S, inspection scores, partial VIN, 29 HD фото |
 | **encar** | direct HTTP API | KR→EN | KRW | VIN, ДТП, Full HD photos |
 | **autocango** | playwright | EN | USD | FOB pricing, original-paint флаг |
 
@@ -99,23 +98,27 @@ poisk_avto/
           └──────────────────────────────────────────┘
 ```
 
-## Схема `cars`
+## Схема `cars` (110 колонок)
 
 | Категория | Колонки |
 |---|---|
-| Источник | `source`, `source_id`, `source_language`, `url`, `title` |
-| Бренд/модель | `brand_id`→brands, `model_id`→models, `generation_id`→model_generations |
-| Метаданные | `mark_original`, `mark`, `series_original`, `model`, `complectation`, `year`, `reg_date` |
+| Источник | `source`, `source_id`, `source_language`, `url`, `title`, `spu_id` |
+| Бренд/модель | `brand_id`→brands, `model_id`→models, `generation_id`→model_generations, `mark`, `mark_original`, `model`, `series_original`, `complectation` |
+| Даты | `year`, `reg_date`, `mfg_date`, `published_at`, `listing_updated_at` |
 | Цена | `price_original`, `price_currency`, `new_price_original`, `new_price_currency` |
-| Состояние | `km_age_original`, `km_age_unit`, `km_age`, `color_original`, `color` |
-| Техника | `body_type`, `engine_type`, `fuel_original`, `transmission_type`, `drive_type`, `displacement`, `horse_power` |
-| Гео | `city_original`, `city`, `reg_city_original`, `reg_city` |
-| Инспекция | `inspection_score`, `accident_free`, `export_ready`, `inspection_data` (jsonb), `labels` (jsonb), `steering`, `keys_count` |
-| Отчёты | `owners_count`, `vin`, `maintenance` |
+| Пробег | `km_age`, `km_age_original`, `km_age_unit` |
+| Двигатель ICE | `engine_type`, `fuel_original`, `displacement`, `horse_power`, `engine_power_kw`, `engine_model`, `num_cylinders`, `cylinder_arrangement`, `valves_per_cylinder`, `valve_train`, `torque_nm`, `power_rpm`, `torque_rpm`, `fuel_consumption` |
+| EV / Батарея | `battery_kwh`, `battery_type`, `battery_health_pct`, `ev_range_km`, `energy_consumption`, `motor_power_kw`, `total_motor_torque_nm`, `front_motor_power_kw`, `front_motor_torque_nm`, `rear_motor_power_kw`, `rear_motor_torque_nm`, `charge_time_fast`, `charge_time_slow` |
+| Трансмиссия | `transmission_type`, `transmission_original`, `drive_type`, `drive_original` |
+| Кузов / размеры | `body_type`, `color`, `color_original`, `interior_color_original`, `length_mm`, `width_mm`, `height_mm`, `wheelbase_mm`, `curb_weight_kg`, `doors`, `seats` |
+| Инспекция | `inspection_grade`, `inspection_score`, `inspection_data` (jsonb), `accident_free`, `no_water_damage`, `no_fire_damage`, `insurance_claims_count`, `owners_count` |
+| Гео / логистика | `city`, `city_original`, `reg_city`, `reg_city_original`, `port`, `steering`, `export_ready` |
 | Фото | `images` (jsonb), `image_count` |
-| Дилер | `seller_type`, `shop_name`, `shop_id` |
-| Жизненный цикл | `first_seen`, `last_seen`, `sold_at`, `published_at` |
-| LLM | `llm_normalized_at` |
+| Дилер | `seller_type`, `shop_name`, `shop_short_name`, `shop_address`, `shop_id`, `shop_cars_count`, `sales_range` |
+| VIN / отчёты | `vin`, `keys_count`, `maintenance`, `description` |
+| Жизненный цикл | `first_seen`, `last_seen`, `sold_at`, `refresh_failed_attempts`, `last_refresh_at` |
+| LLM / QA | `llm_normalized_at`, `llm_suggestion`, `llm_suggested_at`, `quarantine`, `quarantine_reasons`, `labels` |
+| Прочее | `source_data` (jsonb), `acceleration_time` |
 
 ## Расписание
 
@@ -123,10 +126,9 @@ poisk_avto/
 |---|---|---|
 | `scrape-che168.yml` | `15 */4 * * *` | ✅ active |
 | `scrape-guazi.yml` | `30 */2 * * *` | ✅ active |
-| `scrape-guazi-en.yml` | manual | 🔧 в разработке |
+| `scrape-guazi-en.yml` | `45 */3 * * *` | ✅ active |
 | `scrape-encar.yml` | `0 * * * *` | ⏸️ paused |
 | `scrape-autocango.yml` | `45 */12 * * *` | ✅ active |
-| `import-brands.yml` | `0 22 * * 1` | ✅ active |
 | `import-model-specs.yml` | `0 23 1 * *` | ✅ active |
 | `mirror-images.yml` | post-step в che168 | ✅ active |
 
@@ -148,7 +150,7 @@ poisk_avto/
 
 ## Что дальше
 
-- [ ] Стабилизировать EN guazi scraper → перевести на cron, отключить Chinese
+- [x] ~~Стабилизировать EN guazi scraper~~ → cron `*/3h`, все поля в колонках
 - [ ] Включить encar обратно (cron paused)
 - [ ] Frontend dashboard (Next.js + Vercel)
 - [ ] Customs calculator с учётом EREV (0%) vs HEV/PHEV (15%)
