@@ -255,30 +255,43 @@ EXTRACT_MODELS_JS = """(brandSlug) => {
     for (const card of cards) {
         const href = card.getAttribute('href') || '';
         if (!href.startsWith('/models/') || href === '/models/' || seen.has(href)) continue;
+        if (href.includes('?')) continue;
         seen.add(href);
         const slug = href.replace('/models/', '');
+
+        // Model name: best source is img alt, then h3/h2, then slug
+        let name = '';
+        const img = card.querySelector('img');
+        if (img && img.alt && img.alt.length > 1 && img.alt !== 'View Model') {
+            name = img.alt.trim();
+        }
+        if (!name) {
+            const heading = card.querySelector('h2, h3, h4, [class*="title"], [class*="name"]');
+            if (heading) name = heading.innerText.trim();
+        }
+        if (!name || name === 'View Model' || name === 'View Details') {
+            // Build from slug: "byd-song-l-ev" -> "Song L EV"
+            let fromSlug = slug.replace(brandSlug + '-', '');
+            name = fromSlug.split('-').map(w =>
+                w.length <= 2 ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)
+            ).join(' ');
+        }
 
         const text = card.innerText || '';
         const lines = text.split('\\n').map(l => l.trim()).filter(l => l);
 
-        let name = '', bodyType = '', price = null;
+        let bodyType = '', price = null;
         for (const line of lines) {
-            if (line === 'Available' || line === 'Upcoming' || line === 'View Details') continue;
-            if (/^(Sedan|SUV|Hatchback|Minivan|Coupe|Wagon|Pickup|Van|Truck|Liftback|MPV|Shooting Brake|Coupe SUV|Sports Car)/i.test(line)) {
+            if (/^(Sedan|SUV|Hatchback|Minivan|Coupe|Wagon|Pickup|Van|Truck|Liftback|MPV|Shooting Brake|Coupe SUV|Sports Car|Station Wagon)/i.test(line)) {
                 bodyType = line;
             } else if (/^\\$[\\d,]+$/.test(line)) {
                 price = parseInt(line.replace(/[$,]/g, ''), 10);
-            } else if (!name && line.length > 1 && !/^From/.test(line)) {
-                name = line;
             }
         }
 
-        const img = card.querySelector('img');
-        const imgSrc = img ? (img.src || img.getAttribute('data-src') || '') : '';
+        let imgSrc = img ? (img.src || img.getAttribute('data-src') || '') : '';
 
-        if (name) {
-            results.push({ name, slug, bodyType, price, imgSrc });
-        }
+        results.push({ name, slug, bodyType, price, imgSrc });
     }
     return results;
 }"""
