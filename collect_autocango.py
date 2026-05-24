@@ -32,6 +32,7 @@ import time
 from typing import Any
 
 import db as DB
+import stealth
 
 SOURCE = "autocango"
 BASE_URL = "https://www.autocango.com"
@@ -70,6 +71,57 @@ def build_listing_url(city_key: str, page_num: int,
     if page_num > 1:
         parts.append(f"page={page_num}")
     return f"{BASE_URL}/" + "/".join(parts)
+
+
+
+def extract_cars_from_html(html: str) -> list[dict]:
+    """Python port of extract_cars_js() — pulls car-items from the
+    rendered listing HTML. Each card is a <div class="car-item ..."> with
+    an <a href="/sku/..."> inside; the rest is text we strip and regex.
+    """
+    cars: list[dict] = []
+    chunks = re.split(r'<div\s+class="[^"]*\bcar-item\b[^"]*"', html)[1:]
+    for chunk in chunks:
+        block = chunk[:4000]  # ~4KB cap so regex stays fast
+        href_m = re.search(r'href="(/sku/[^"]+)"', block)
+        if not href_m:
+            continue
+        href = href_m.group(1)
+        id_m = re.search(r"[A-Z]{2,4}\d{6,10}", href)
+        if not id_m:
+            continue
+        cid = id_m.group(0)
+        type_slug = brand_slug = model_slug = None
+        slug_m = re.search(
+            r"/sku/(newcar|usedcar)-(.+?)-[A-Z]{2,4}\d{6,10}", href,
+        )
+        if slug_m:
+            type_slug = slug_m.group(1)
+            middle = slug_m.group(2).split("-")
+            brand_slug = middle[0] if middle else None
+            model_slug = " ".join(middle[1:]) if len(middle) > 1 else None
+        imgs = re.findall(
+            r'<img[^>]+src="(https?://[^"]+\.(?:jpe?g|png|webp)[^"]*)"',
+            block,
+        )
+        imgs = [u.split("?")[0] for u in imgs[:3]]
+        text = re.sub(r"<[^>]+>", " ", block)
+        text = re.sub(r"\s+", " ", text).strip()
+        price_usd = None
+        m = re.search(r"\$\s*([\d,]+)", text)
+        if m:
+            try:
+                price_usd = int(m.group(1).replace(",", ""))
+            except ValueError:
+                pass
+        absolute_href = href if href.startswith("http") else BASE_URL + href
+        cars.append({
+            "id": cid, "href": absolute_href,
+            "type_slug": type_slug, "brand_slug": brand_slug,
+            "model_slug": model_slug,
+            "images": imgs, "text": text, "price_usd": price_usd,
+        })
+    return cars
 
 
 def extract_cars_js() -> str:
@@ -164,8 +216,6 @@ def main() -> None:
     if bad:
         sys.exit(f"Unknown cities: {bad}. Available: {list(CITIES.keys())}")
 
-    from playwright.sync_api import sync_playwright
-
     print(f"Backend: {DB.backend_name()}")
     print(f"Source: {SOURCE}")
     print(f"Cities ({len(cities)}): {cities}")
@@ -187,50 +237,58 @@ def main() -> None:
     all_cars: dict[str, dict] = {}
     started = time.time()
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=["--disable-blink-features=AutomationControlled",
-                  "--no-sandbox", "--disable-dev-shm-usage"],
-        )
-        ctx = browser.new_context(user_agent=UA,
-                                  viewport={"width": 1366, "height": 768},
-                                  locale="en-US")
-        ctx.add_init_script(
-            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
-        )
-        page = ctx.new_page()
-
-        for city in cities:
-            print(f"\n=== {city} ===")
-            cars_in_city = 0
-            for n in range(1, args.pages_per_city + 1):
-                url = build_listing_url(city, n,
-                                         args.min_price, args.min_year,
-                                         args.original_paint,
-                                         args.exclude_sold)
-                try:
-                    page.goto(url, wait_until="networkidle", timeout=60_000)
-                    page.wait_for_timeout(1200)
-                    cars = page.evaluate(extract_cars_js())
-                except Exception as e:
-                    print(f"  [{city} p{n}] EXCEPTION: {e}")
-                    continue
-                new_on_page = 0
-                for car in cars:
-                    cid = car.get("id")
-                    if cid and cid not in all_cars:
-                        all_cars[cid] = {**car, "source_city": city}
-                        new_on_page += 1
-                cars_in_city += len(cars)
-                elapsed = int(time.time() - started)
-                print(f"  [{city} p{n}] {len(cars)} cars ({new_on_page} new) "
-                      f"| total unique: {len(all_cars)} | {elapsed}s")
-                if len(cars) == 0:
-                    print(f"  [{city}] no cars on page {n} — moving to next city")
-                    break
-
-        browser.close()
+    for city in cities:
+        print(f"\n=== {city} ===")
+        cars_in_city = 0
+        for n in range(1, args.pages_per_city + 1):
+            url = build_listing_url(city, n,
+                                     args.min_price, args.min_year,
+                                     args.original_paint,
+                                     args.exclude_sold)
+            # Two-tier stealth fetch: Camoufox (free) → Oxylabs CN-geo
+            # (paid). wait_selector keeps the browser open until at least
+            # one car-item shows up, so we don't race the JS render.
+            html = stealth.fetch_protected_html(
+                url, wait_selector="div.car-item",
+            )
+            cars = []
+            if html and not stealth.looks_like_challenge(html):
+                cars = extract_cars_from_html(html)
+            # Diagnostic dump when even the protected fetch returned a
+            # challenge or no cars — tells us whether Scrapling or
+            # Oxylabs is the one being blocked.
+            if n == 1 and not cars:
+                title_text = ""
+                m = re.search(r"<title>(.*?)</title>",
+                              html or "", re.DOTALL)
+                if m:
+                    title_text = m.group(1).strip()[:120]
+                sample_hrefs = sorted(set(
+                    re.findall(r'href="(/[a-zA-Z0-9_./-]+/)"', html or "")
+                ))[:20]
+                head = (html or "")[:1500]
+                print(
+                    f"  ⚠ DIAGNOSE [autocango/{city}] {url}\n"
+                    f"    HTML length: {len(html or '')}\n"
+                    f"    <title>: {title_text!r}\n"
+                    f"    sample hrefs ({len(sample_hrefs)}): {sample_hrefs}\n"
+                    f"    HTML preview:\n{head}\n"
+                    f"    ---end preview---",
+                    flush=True,
+                )
+            new_on_page = 0
+            for car in cars:
+                cid = car.get("id")
+                if cid and cid not in all_cars:
+                    all_cars[cid] = {**car, "source_city": city}
+                    new_on_page += 1
+            cars_in_city += len(cars)
+            elapsed = int(time.time() - started)
+            print(f"  [{city} p{n}] {len(cars)} cars ({new_on_page} new) "
+                  f"| total unique: {len(all_cars)} | {elapsed}s")
+            if len(cars) == 0:
+                print(f"  [{city}] no cars on page {n} — moving to next city")
+                break
 
     print(f"\nTotal unique cars across all cities: {len(all_cars)}")
 

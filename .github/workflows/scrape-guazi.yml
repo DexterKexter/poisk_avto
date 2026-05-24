@@ -40,6 +40,11 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    # GITHUB_RUN_URL is consumed by scrape_*.py -> DB.sync_log_start so each
+    # row in the admin 'Последние запуски' panel deep-links back to the
+    # exact GH Actions run for log inspection.
+    env:
+      GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -57,6 +62,13 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # Oxylabs proxy with China geo. Without these the collector falls
+          # back to direct Playwright, which gets 301-redirected to
+          # en.guazi.com (US runner) and the homepage returns the English
+          # placeholder with zero brand links — exactly the empty-result
+          # symptom we diagnose below.
+          OXY_USER: ${{ secrets.OXY_USER }}
+          OXY_PASS: ${{ secrets.OXY_PASS }}
         run: |
           python collect_guazi.py \
             --cities         "${{ inputs.cities         || 'Beijing,Shanghai,Guangzhou,Shenzhen,Chengdu,Hangzhou' }}" \

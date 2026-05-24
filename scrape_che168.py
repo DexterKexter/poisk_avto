@@ -326,12 +326,6 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
     transfers = parse_int(specs.get("transfers_text"))
 
     # Flat columns: derived from raw badges/specs
-    has_accident_record: bool | None = None
-    if isinstance(badges, dict) and badges:
-        try:
-            has_accident_record = int(badges.get("事故车", 0) or 0) > 0
-        except (TypeError, ValueError):
-            has_accident_record = None
     battery_health_pct: float | None = None
     bh_raw = specs.get("battery_health") or ""
     bh_digits = re.sub(r"[^0-9.]", "", bh_raw)
@@ -416,7 +410,6 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
         "vin": vin,
 
         "owners_count": transfers,
-        "has_accident_record": has_accident_record,
         "battery_health_pct": battery_health_pct,
 
         "images": photos,
@@ -544,42 +537,52 @@ def main() -> None:
     if not DB.USE_POSTGRES:
         sys.exit("Need Postgres")
 
-    pending = fetch_pending_rows(args.limit)
-    if not pending:
-        print("No pending IDs"); return
-    print(f"Scraping {len(pending)} che168 cards with {args.workers} workers"
-          f" (batches of 20 per playwright session)")
-
-    BATCH_SIZE = 20
-    batches = [pending[i:i+BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)]
-
+    # Open a sync_log row so the admin dashboard can show this run.
+    run_id = DB.sync_log_start(SOURCE, os.environ.get("GITHUB_RUN_URL"))
     ok_count = 0
     fail_count = 0
-    started = time.time()
-    processed = 0
+    error_message: str | None = None
+    try:
+        pending = fetch_pending_rows(args.limit)
+        if not pending:
+            print("No pending IDs")
+            return
+        print(f"Scraping {len(pending)} che168 cards with {args.workers} workers"
+              f" (batches of 20 per playwright session)")
 
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(scrape_batch, b): b for b in batches}
-        for fut in as_completed(futs):
-            try:
-                results = fut.result()
-            except Exception:
-                traceback.print_exc()
-                fail_count += len(futs[fut])
-                continue
-            for sku_id, ok, err in results:
-                processed += 1
-                if ok:
-                    ok_count += 1
-                else:
-                    DB.mark_failed(SOURCE, sku_id)
-                    fail_count += 1
-            elapsed = int(time.time() - started)
-            print(f"  batch done: {processed}/{len(pending)} "
-                  f"(ok={ok_count}, fail={fail_count}, {elapsed}s)")
+        BATCH_SIZE = 20
+        batches = [pending[i:i+BATCH_SIZE] for i in range(0, len(pending), BATCH_SIZE)]
 
-    elapsed = int(time.time() - started)
-    print(f"\nDone in {elapsed}s. OK: {ok_count}, FAIL: {fail_count}")
+        started = time.time()
+        processed = 0
+
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futs = {ex.submit(scrape_batch, b): b for b in batches}
+            for fut in as_completed(futs):
+                try:
+                    results = fut.result()
+                except Exception:
+                    traceback.print_exc()
+                    fail_count += len(futs[fut])
+                    continue
+                for sku_id, ok, err in results:
+                    processed += 1
+                    if ok:
+                        ok_count += 1
+                    else:
+                        DB.mark_failed(SOURCE, sku_id)
+                        fail_count += 1
+                elapsed = int(time.time() - started)
+                print(f"  batch done: {processed}/{len(pending)} "
+                      f"(ok={ok_count}, fail={fail_count}, {elapsed}s)")
+
+        elapsed = int(time.time() - started)
+        print(f"\nDone in {elapsed}s. OK: {ok_count}, FAIL: {fail_count}")
+    except Exception as e:
+        error_message = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+        raise
+    finally:
+        DB.sync_log_finish(run_id, added=ok_count, failed=fail_count, error_message=error_message)
 
 
 if __name__ == "__main__":

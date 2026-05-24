@@ -2,8 +2,9 @@ name: Scrape AutoCango
 
 on:
   schedule:
-    # Every 12 hours at :45 (offset from all other scrapers).
-    # autocango is an aggregator with a slow refresh rate; twice a day is plenty.
+    # Every 12 hours at :45. autocango is a low-refresh aggregator — twice
+    # a day is plenty. Re-enabled after switching to Scrapling/Oxylabs
+    # stealth fetch (see collect_autocango.py + stealth.py).
     - cron: '45 */12 * * *'
   workflow_dispatch:
     inputs:
@@ -44,6 +45,11 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    # GITHUB_RUN_URL is consumed by scrape_*.py -> DB.sync_log_start so each
+    # row in the admin 'Последние запуски' panel deep-links back to the
+    # exact GH Actions run for log inspection.
+    env:
+      GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -51,15 +57,30 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install deps + playwright
+      - name: Install deps + Scrapling/Camoufox
         run: |
           pip install -r requirements-scrapling.txt
+          # Camoufox = custom Firefox build with stealth patches that
+          # Scrapling drives. `scrapling install` is the entry-point
+          # script that pulls camoufox + its ~100 MB binary on first run.
+          # (`python -m scrapling install` doesn't work — the package
+          # has no __main__.py.)
+          scrapling install
+          # Camoufox itself also exposes a fetch command — belt-and-braces
+          # in case Scrapling's wrapper changes shape between releases.
+          python -m camoufox fetch || true
+          # playwright/chromium kept for any legacy fallback paths
           python -m playwright install chromium --with-deps
 
       - name: Collect quality listings (6 cities + filters)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # Oxylabs Realtime API as Scrapling's fallback. The collector
+          # tries Scrapling/Camoufox first; if a Tencent EdgeOne challenge
+          # still shows, it falls back to Oxylabs CN-geo + render=html.
+          OXY_USER: ${{ secrets.OXY_USER }}
+          OXY_PASS: ${{ secrets.OXY_PASS }}
         run: |
           python collect_autocango.py \
             --cities         "${{ inputs.cities         || 'Shanghai,Guangzhou,Shenzhen,Beijing,Tianjin,Chengdu' }}" \
@@ -73,5 +94,9 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          # Same Scrapling → Oxylabs ladder for detail pages — they live
+          # behind the same WAF as the listings.
+          OXY_USER: ${{ secrets.OXY_USER }}
+          OXY_PASS: ${{ secrets.OXY_PASS }}
         run: |
           python scrape_autocango.py --limit ${{ inputs.scrape_limit || 500 }}
