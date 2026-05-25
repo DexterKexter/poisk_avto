@@ -667,6 +667,7 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
     ts = DB.now_iso()
     return {
         "source": SOURCE,
+        "country": "China",
         "source_id": item_id,
         "source_language": SOURCE_LANGUAGE,
         "url": detail_url,
