@@ -102,14 +102,14 @@ def fetch(url: str, *, as_json: bool, retries: int = 3,
     return None
 
 
-def fetch_existing_counts() -> dict[int, int]:
-    """brand_id -> model_count for already-saved brands (resume support)."""
-    out: dict[int, int] = {}
-    r = DB._pg_request("GET", "kolesa_brands?select=id,model_count")
+def fetch_done_brand_ids() -> set[int]:
+    """Brand ids already fetched (model_count IS NOT NULL). NULL = not yet
+    fetched or failed → eligible for a resume pass."""
+    done: set[int] = set()
+    r = DB._pg_request("GET", "kolesa_brands?select=id&model_count=not.is.null")
     if r.status_code == 200:
-        for row in r.json():
-            out[row["id"]] = row.get("model_count") or 0
-    return out
+        done = {row["id"] for row in r.json()}
+    return done
 
 
 def fetch_brands() -> list[dict]:
@@ -202,10 +202,9 @@ def main() -> None:
     print(f"  {len(brands)} brands")
 
     only = {s.strip() for s in args.only.split(",") if s.strip()}
-    existing = fetch_existing_counts() if args.resume else {}
+    done_ids = fetch_done_brand_ids() if args.resume else set()
     if args.resume:
-        done = sum(1 for v in existing.values() if v > 0)
-        print(f"  resume: {done} brands already have models — skipping them")
+        print(f"  resume: {len(done_ids)} brands already fetched — skipping them")
 
     brands_saved = models_total = 0
     processed = skipped = 0
@@ -216,7 +215,7 @@ def main() -> None:
         slug = brand_slug(brand["name"])
         if only and slug not in only:
             continue
-        if args.resume and existing.get(brand["id"], 0) > 0:
+        if args.resume and brand["id"] in done_ids:
             skipped += 1
             continue
         if args.limit_brands and processed >= args.limit_brands:
