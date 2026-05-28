@@ -120,6 +120,80 @@ def tr(value: str, mapping: dict) -> str:
     return mapping.get(value.strip(), value.strip())
 
 
+# ---------- Brand / model catalog matching ----------
+
+# encar concatenates historical legal-entity names; normalize to the current
+# consumer-facing brand as it appears in the `brands` catalog.
+ENCAR_BRAND_ALIASES = {
+    "ChevroletGMDaewoo": "Chevrolet",
+    "Renault-KoreaSamsung": "Renault Korea",
+    "Renault Korea": "Renault",
+    "RenaultSamsung": "Renault",
+    "KG_Mobility_Ssangyong": "KG Mobility",
+    "Ssangyong": "KG Mobility",
+    "Citroen-DS": "Citroen",
+}
+
+# encar English model-group names → catalog model names.
+ENCAR_MODEL_ALIASES = {
+    "avante": "Elantra", "canival": "Carnival", "morning": "Picanto",
+    "santafe": "Santa Fe", "grandeur": "Azera", "starex": "H-1",
+    "mohave": "Borrego", "qm6": "Koleos",
+}
+
+_brand_cache: dict[str, int] = {}
+_model_cache: dict[tuple[int, str], int] = {}
+
+
+def _load_brand_cache() -> None:
+    if _brand_cache:
+        return
+    r = DB._pg_request("GET", "brands?select=id,name,slug")
+    if r.status_code != 200:
+        return
+    for row in r.json():
+        _brand_cache[row["name"].lower()] = row["id"]
+        _brand_cache[row["slug"].lower()] = row["id"]
+
+
+def _load_model_cache() -> None:
+    if _model_cache:
+        return
+    r = DB._pg_request("GET", "models?select=id,brand_id,name,slug")
+    if r.status_code != 200:
+        return
+    for row in r.json():
+        bid = row.get("brand_id")
+        if bid:
+            _model_cache[(bid, row["name"].lower())] = row["id"]
+            _model_cache[(bid, row["slug"].lower())] = row["id"]
+
+
+def normalize_brand(name: str) -> str:
+    """Apply encar→catalog brand aliases."""
+    return ENCAR_BRAND_ALIASES.get(name, name)
+
+
+def lookup_brand_id(brand_name: str) -> int | None:
+    if not brand_name:
+        return None
+    _load_brand_cache()
+    return _brand_cache.get(brand_name.lower())
+
+
+def lookup_model_id(brand_id: int | None, *model_names: str) -> int | None:
+    """Match the first model name that resolves against the catalog."""
+    if not brand_id:
+        return None
+    _load_model_cache()
+    for name in model_names:
+        if name:
+            mid = _model_cache.get((brand_id, name.lower()))
+            if mid:
+                return mid
+    return None
+
+
 # ---------- API fetch ----------
 
 def fetch_batch(ids: list[str]) -> list[dict] | None:
@@ -204,26 +278,20 @@ def parse_car(api_car: dict) -> dict | None:
 
         mark_orig = category.get("manufacturerName", "")
         mark_en = category.get("manufacturerEnglishName") or mark_orig
-        # encar concatenates historical legal-entity names ("ChevroletGMDaewoo",
-        # "Renault-KoreaSamsung", "KG_Mobility_Ssangyong", "Citroen-DS").
-        # Normalize to the current consumer-facing brand.
-        ENCAR_BRAND_ALIASES = {
-            "ChevroletGMDaewoo": "Chevrolet",
-            "Renault-KoreaSamsung": "Renault Korea",
-            "KG_Mobility_Ssangyong": "KG Mobility",
-            "Citroen-DS": "Citroen",
-        }
-        mark_en = ENCAR_BRAND_ALIASES.get(mark_en, mark_en)
+        # Normalize to the current consumer-facing brand (see ENCAR_BRAND_ALIASES).
+        # Run twice so chained aliases resolve (e.g. Renault-KoreaSamsung →
+        # Renault Korea → Renault).
+        mark_en = normalize_brand(normalize_brand(mark_en))
         model_group_en = category.get("modelGroupEnglishName", "")
         grade_en = category.get("gradeEnglishName", "")
 
-        ENCAR_MODEL_ALIASES = {
-            "avante": "Elantra", "canival": "Carnival", "morning": "Picanto",
-            "santafe": "Santa Fe", "grandeur": "Azera", "starex": "H-1",
-            "mohave": "Borrego", "qm6": "Koleos",
-        }
         model_clean = ENCAR_MODEL_ALIASES.get(model_group_en.lower(), model_group_en)
         complectation_str = grade_en or category.get("gradeName", "")
+
+        # Match against the brands / models catalog.
+        brand_id = lookup_brand_id(mark_en)
+        model_id = lookup_model_id(
+            brand_id, model_clean, model_group_en, category.get("modelName", ""))
 
         ts = DB.now_iso()
 
@@ -236,6 +304,8 @@ def parse_car(api_car: dict) -> dict | None:
 
             "mark_original": mark_orig,
             "mark": mark_en,
+            "brand_id": brand_id,
+            "model_id": model_id,
             "series_original": model_group_en or category.get("modelName", ""),
             "model": model_clean or model_group_en or category.get("modelName", ""),
             "complectation": complectation_str,

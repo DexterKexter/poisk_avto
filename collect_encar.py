@@ -110,6 +110,8 @@ def main() -> None:
     ap.add_argument("--batch-pause", type=int, default=1)
     ap.add_argument("--min-year", type=int, default=0,
                     help="Skip cars with Year < YYYY*100 (0 = no filter)")
+    ap.add_argument("--max-mileage-km", type=int, default=0,
+                    help="Skip cars with Mileage > N km (0 = no filter)")
     ap.add_argument("--limit", type=int, default=10000,
                     help="Max new IDs to upsert this run")
     args = ap.parse_args()
@@ -119,7 +121,8 @@ def main() -> None:
     print(f"Source: {SOURCE} (direct API mode)")
     print(f"Plan: {args.pages} batches × {args.page_size} cars = up to {total_target}")
     print(f"Parallel: {args.batch_size}, pause {args.batch_pause}s")
-    print(f"Filters: min_year={args.min_year}, limit={args.limit}\n")
+    print(f"Filters: min_year={args.min_year}, "
+          f"max_mileage_km={args.max_mileage_km}, limit={args.limit}\n")
 
     print("Loading known IDs cache…")
     known = fetch_known_ids()
@@ -154,7 +157,7 @@ def main() -> None:
 
     print(f"\nTotal unique cars across batches: {len(all_cars)}")
 
-    skipped_known = skipped_old = 0
+    skipped_known = skipped_old = skipped_mileage = 0
     to_save: list[tuple[str, dict]] = []
     min_year_int = args.min_year * 100 if args.min_year else 0  # Year format YYYYMM
     for cid, car in all_cars.items():
@@ -165,12 +168,18 @@ def main() -> None:
         if min_year_int and isinstance(year_int, int) and year_int < min_year_int:
             skipped_old += 1
             continue
+        mileage = car.get("Mileage")
+        if (args.max_mileage_km and isinstance(mileage, (int, float))
+                and mileage > args.max_mileage_km):
+            skipped_mileage += 1
+            continue
         # Metadata: drop heavy `Photos` list, keep small fields
         metadata = {k: v for k, v in car.items() if k != "Photos"}
         to_save.append((cid, metadata))
 
     print(f"  already in DB: {skipped_known}")
     print(f"  too old (Year < {min_year_int}): {skipped_old}")
+    print(f"  too many km (> {args.max_mileage_km}): {skipped_mileage}")
     print(f"  to save: {len(to_save)}")
 
     saved = 0
