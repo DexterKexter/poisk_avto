@@ -75,20 +75,22 @@ def prettify_model(slug: str) -> str:
     return slug.replace("-", " ").title()
 
 
-def fetch(url: str, *, as_json: bool, retries: int = 4,
-          delay: float = 2.5) -> object | None:
+def fetch(url: str, *, as_json: bool, retries: int = 3,
+          delay: float = 2.5, timeout: int = 15) -> object | None:
     """GET with polite pacing + 503 retry/backoff.
 
     JSON (ajax) endpoints need the XHR header; HTML pages must not have it.
+    Short timeout + capped retries so a rate-limited/hung brand fails fast
+    instead of blackholing the run (we converge via resumable re-runs).
     """
     headers = XHR_HEADERS if as_json else HEADERS
     for attempt in range(retries):
         try:
-            r = requests.get(url, headers=headers, timeout=30)
+            r = requests.get(url, headers=headers, timeout=timeout)
             if r.status_code == 200:
                 return r.json() if as_json else r.text
             if r.status_code in (403, 429, 503):
-                wait = delay * (2 ** attempt)
+                wait = min(delay * (2 ** attempt), 20)
                 print(f"    {r.status_code} on {url[:60]} — backoff {wait:.0f}s")
                 time.sleep(wait)
                 continue
@@ -96,8 +98,18 @@ def fetch(url: str, *, as_json: bool, retries: int = 4,
             return None
         except Exception as e:
             print(f"    error on {url[:60]}: {e}")
-            time.sleep(delay * (2 ** attempt))
+            time.sleep(min(delay * (2 ** attempt), 20))
     return None
+
+
+def fetch_existing_counts() -> dict[int, int]:
+    """brand_id -> model_count for already-saved brands (resume support)."""
+    out: dict[int, int] = {}
+    r = DB._pg_request("GET", "kolesa_brands?select=id,model_count")
+    if r.status_code == 200:
+        for row in r.json():
+            out[row["id"]] = row.get("model_count") or 0
+    return out
 
 
 def fetch_brands() -> list[dict]:
@@ -172,6 +184,12 @@ def main() -> None:
                     help="Base delay between brand-page requests (seconds)")
     ap.add_argument("--skip-models", action="store_true",
                     help="Only refresh the brand list, skip model pages")
+    ap.add_argument("--resume", action="store_true",
+                    help="Skip brands that already have model_count>0 (for "
+                         "convergent multi-pass runs against kolesa rate limits)")
+    ap.add_argument("--max-consecutive-fails", type=int, default=8,
+                    help="Stop after this many back-to-back page failures "
+                         "(rate-limit wall) so a resume run can continue")
     args = ap.parse_args()
 
     if not DB.USE_POSTGRES:
@@ -184,14 +202,22 @@ def main() -> None:
     print(f"  {len(brands)} brands")
 
     only = {s.strip() for s in args.only.split(",") if s.strip()}
+    existing = fetch_existing_counts() if args.resume else {}
+    if args.resume:
+        done = sum(1 for v in existing.values() if v > 0)
+        print(f"  resume: {done} brands already have models — skipping them")
 
     brands_saved = models_total = 0
-    processed = 0
+    processed = skipped = 0
+    consec_fail = 0
     started = time.time()
 
     for brand in brands:
         slug = brand_slug(brand["name"])
         if only and slug not in only:
+            continue
+        if args.resume and existing.get(brand["id"], 0) > 0:
+            skipped += 1
             continue
         if args.limit_brands and processed >= args.limit_brands:
             break
@@ -206,9 +232,16 @@ def main() -> None:
         html = fetch(BRAND_PAGE.format(slug=slug), as_json=False,
                      delay=args.delay)
         if not html:
-            print(f"  [{slug}] page unavailable — brand saved, 0 models")
+            consec_fail += 1
+            print(f"  [{slug}] page unavailable — brand saved, 0 models "
+                  f"(consec fail {consec_fail}/{args.max_consecutive_fails})")
+            if consec_fail >= args.max_consecutive_fails:
+                print("  too many consecutive failures — likely rate-limited; "
+                      "stopping so a --resume re-run can continue later")
+                break
             time.sleep(args.delay)
             continue
+        consec_fail = 0
 
         model_slugs = extract_models(html, slug)
         n = upsert_models(brand["id"], model_slugs)
@@ -222,7 +255,8 @@ def main() -> None:
 
     elapsed = int(time.time() - started)
     print(f"\nDone in {elapsed}s. Brands: {brands_saved}, "
-          f"models: {models_total} across {processed} brands")
+          f"models: {models_total} across {processed} brands "
+          f"(skipped {skipped} already-done)")
 
 
 if __name__ == "__main__":

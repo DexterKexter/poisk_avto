@@ -23,6 +23,10 @@ on:
         description: 'Only refresh brand list (true/false)'
         required: false
         default: 'false'
+      resume:
+        description: 'Skip brands that already have models (true/false)'
+        required: false
+        default: 'true'
 
 concurrency:
   group: scrape-kolesa-catalog
@@ -48,4 +52,5 @@ jobs:
             --limit-brands ${{ inputs.limit_brands || 0 }} \
             --only        "${{ inputs.only || '' }}" \
             --delay        ${{ inputs.delay || 2.5 }} \
-            ${{ (inputs.skip_models == 'true') && '--skip-models' || '' }}
+            ${{ (inputs.skip_models == 'true') && '--skip-models' || '' }} \
+            ${{ (inputs.resume != 'false') && '--resume' || '' }}
