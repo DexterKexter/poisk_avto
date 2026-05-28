@@ -60,14 +60,30 @@ CYRILLIC_SLUGS = {
 }
 
 
-def slugify(name: str) -> str:
-    s = name.lower().replace("&", "and")
-    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
-    return s
+# Brands whose kolesa slug isn't derivable from the name by rule.
+SLUG_OVERRIDES = {
+    "Renault Samsung": "samsung",
+}
 
 
-def brand_slug(name: str) -> str:
-    return CYRILLIC_SLUGS.get(name) or slugify(name)
+def slugify(name: str, split_camel: bool = True) -> str:
+    s = name.strip()
+    if split_camel:  # DongFeng -> Dong-Feng -> dong-feng (kolesa convention)
+        s = re.sub(r"(?<=[a-z])(?=[A-Z])", "-", s)
+    s = s.lower().replace("&", "and")
+    return re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+
+
+def brand_slug_candidates(name: str) -> list[str]:
+    """Ordered kolesa URL-slug candidates to try for a brand name."""
+    cands: list[str] = []
+    for c in (CYRILLIC_SLUGS.get(name), SLUG_OVERRIDES.get(name),
+              slugify(name, split_camel=True),    # dong-feng
+              slugify(name, split_camel=False),   # dongfeng
+              re.sub(r"[^a-z0-9]+", "", name.lower())):  # dongfeng (no seps)
+        if c and c not in cands:
+            cands.append(c)
+    return cands
 
 
 def prettify_model(slug: str) -> str:
@@ -75,36 +91,71 @@ def prettify_model(slug: str) -> str:
     return slug.replace("-", " ").title()
 
 
-def fetch(url: str, *, as_json: bool, retries: int = 4,
-          delay: float = 2.5) -> object | None:
+def fetch(url: str, *, as_json: bool, retries: int = 3,
+          delay: float = 2.5, timeout: int = 15) -> object | None:
     """GET with polite pacing + 503 retry/backoff.
 
     JSON (ajax) endpoints need the XHR header; HTML pages must not have it.
+    Short timeout + capped retries so a rate-limited/hung brand fails fast
+    instead of blackholing the run (we converge via resumable re-runs).
     """
     headers = XHR_HEADERS if as_json else HEADERS
+    last_code = 0
     for attempt in range(retries):
         try:
-            r = requests.get(url, headers=headers, timeout=30)
+            r = requests.get(url, headers=headers, timeout=timeout)
+            last_code = r.status_code
             if r.status_code == 200:
-                return r.json() if as_json else r.text
+                return (r.json() if as_json else r.text), 200
             if r.status_code in (403, 429, 503):
-                wait = delay * (2 ** attempt)
+                wait = min(delay * (2 ** attempt), 20)
                 print(f"    {r.status_code} on {url[:60]} — backoff {wait:.0f}s")
                 time.sleep(wait)
                 continue
-            print(f"    HTTP {r.status_code} on {url[:70]}")
-            return None
+            return None, r.status_code  # 404 etc — permanent, don't retry
         except Exception as e:
             print(f"    error on {url[:60]}: {e}")
-            time.sleep(delay * (2 ** attempt))
-    return None
+            last_code = -1
+            time.sleep(min(delay * (2 ** attempt), 20))
+    return None, last_code
+
+
+def fetch_done_brand_ids() -> set[int]:
+    """Brand ids already fetched (model_count IS NOT NULL). NULL = not yet
+    fetched or failed → eligible for a resume pass."""
+    done: set[int] = set()
+    r = DB._pg_request("GET", "kolesa_brands?select=id&model_count=not.is.null")
+    if r.status_code == 200:
+        done = {row["id"] for row in r.json()}
+    return done
 
 
 def fetch_brands() -> list[dict]:
-    data = fetch(MARKS_API, as_json=True)
+    data, _ = fetch(MARKS_API, as_json=True)
     if not isinstance(data, dict) or data.get("status") != "success":
         return []
     return data.get("data") or []
+
+
+def crawl_models(brand: dict, delay: float) -> tuple[int, str]:
+    """Try slug candidates until one loads. Returns (model_count, status).
+
+    status: 'ok' (a page loaded, models saved — count may be 0),
+            'notfound' (every candidate 404'd — genuinely no page → count 0),
+            'blocked' (rate-limited/error — leave NULL, retry next pass).
+    """
+    any_404 = False
+    for slug in brand_slug_candidates(brand["name"]):
+        html, code = fetch(BRAND_PAGE.format(slug=slug), as_json=False, delay=delay)
+        if code == 200 and html is not None:
+            n = upsert_models(brand["id"], extract_models(html, slug))
+            return n, "ok"
+        if code == 404:
+            any_404 = True
+            continue
+        # 503/429/timeout/other → rate-limited; stop trying candidates
+        return 0, "blocked"
+    return 0, ("notfound" if any_404 else "blocked")
 
 
 # City / service segments that share the /cars/{brand}/{x} shape but aren't models.
@@ -172,6 +223,12 @@ def main() -> None:
                     help="Base delay between brand-page requests (seconds)")
     ap.add_argument("--skip-models", action="store_true",
                     help="Only refresh the brand list, skip model pages")
+    ap.add_argument("--resume", action="store_true",
+                    help="Skip brands that already have model_count>0 (for "
+                         "convergent multi-pass runs against kolesa rate limits)")
+    ap.add_argument("--max-consecutive-fails", type=int, default=8,
+                    help="Stop after this many back-to-back page failures "
+                         "(rate-limit wall) so a resume run can continue")
     args = ap.parse_args()
 
     if not DB.USE_POSTGRES:
@@ -185,44 +242,61 @@ def main() -> None:
 
     only = {s.strip() for s in args.only.split(",") if s.strip()}
 
-    brands_saved = models_total = 0
-    processed = 0
+    # Phase 1: upsert ALL brands first (cheap, marks API only) so the brand
+    # table is always complete regardless of model-crawl rate limits.
+    brands_saved = 0
+    for brand in brands:
+        if only and slugify(brand["name"]) not in only:
+            continue
+        if upsert_brand(brand, brand_slug_candidates(brand["name"])[0]):
+            brands_saved += 1
+    print(f"  phase 1: {brands_saved} brands upserted")
+
+    if args.skip_models:
+        print("Done (skip-models).")
+        return
+
+    # Phase 2: crawl models for brands not yet fetched (model_count IS NULL).
+    done_ids = fetch_done_brand_ids() if args.resume else set()
+    if args.resume:
+        print(f"  resume: {len(done_ids)} brands already fetched — skipping them")
+
+    models_total = processed = skipped = consec_block = 0
     started = time.time()
 
     for brand in brands:
-        slug = brand_slug(brand["name"])
-        if only and slug not in only:
+        if only and slugify(brand["name"]) not in only:
+            continue
+        if args.resume and brand["id"] in done_ids:
+            skipped += 1
             continue
         if args.limit_brands and processed >= args.limit_brands:
             break
         processed += 1
 
-        if upsert_brand(brand, slug):
-            brands_saved += 1
-
-        if args.skip_models:
-            continue
-
-        html = fetch(BRAND_PAGE.format(slug=slug), as_json=False,
-                     delay=args.delay)
-        if not html:
-            print(f"  [{slug}] page unavailable — brand saved, 0 models")
+        n, status = crawl_models(brand, args.delay)
+        if status == "blocked":
+            consec_block += 1
+            print(f"  [{brand['name']}] blocked (rate-limit) "
+                  f"{consec_block}/{args.max_consecutive_fails} — left for retry")
+            if consec_block >= args.max_consecutive_fails:
+                print("  rate-limit wall — stopping so a --resume re-run continues")
+                break
             time.sleep(args.delay)
             continue
+        consec_block = 0
 
-        model_slugs = extract_models(html, slug)
-        n = upsert_models(brand["id"], model_slugs)
+        # ok or notfound → a definitive answer; record count (0 allowed).
         set_model_count(brand["id"], n)
         models_total += n
-
         elapsed = int(time.time() - started)
-        print(f"  [{slug}] id={brand['id']} -> {n} models "
-              f"({processed}/{len(brands)}, total models {models_total}, {elapsed}s)")
+        print(f"  [{brand['name']}] -> {n} models [{status}] "
+              f"({processed} done, total {models_total}, {elapsed}s)")
         time.sleep(args.delay)
 
     elapsed = int(time.time() - started)
-    print(f"\nDone in {elapsed}s. Brands: {brands_saved}, "
-          f"models: {models_total} across {processed} brands")
+    print(f"\nDone in {elapsed}s. Models: {models_total} across {processed} "
+          f"brands (skipped {skipped} already-done)")
 
 
 if __name__ == "__main__":
