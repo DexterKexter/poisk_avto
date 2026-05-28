@@ -25,12 +25,19 @@ on:
       max_pages:
         required: false
         default: '500'
+      max_pages_per_brand:
+        required: false
+        default: '30'
+      brands:
+        required: false
+        default: ''
+        description: 'Comma-separated brand slugs (empty = auto-discover all)'
       collect_limit:
         required: false
         default: '20000'
       scrape_limit:
         required: false
-        default: '3000'
+        default: '5000'
       workers:
         required: false
         default: '4'
@@ -64,13 +71,15 @@ jobs:
           GUAZI_PASSWORD: ${{ secrets.GUAZI_PASSWORD }}
         run: |
           python collect_guazi_en.py \
-            --min-year       ${{ inputs.min_year       || 2021 }} \
-            --max-mileage-km ${{ inputs.max_mileage_km || 100000 }} \
-            --min-price-usd  ${{ inputs.min_price_usd  || 7000 }} \
-            --grades        "${{ inputs.grades         || 'S,A' }}" \
-            --seller-types  "${{ inputs.seller_types   || '180003,180002' }}" \
-            --max-pages      ${{ inputs.max_pages      || 500 }} \
-            --limit          ${{ inputs.collect_limit   || 20000 }}
+            --min-year            ${{ inputs.min_year            || 2021 }} \
+            --max-mileage-km      ${{ inputs.max_mileage_km      || 100000 }} \
+            --min-price-usd       ${{ inputs.min_price_usd       || 7000 }} \
+            --grades             "${{ inputs.grades              || 'S,A' }}" \
+            --seller-types       "${{ inputs.seller_types        || '180003,180002' }}" \
+            --max-pages           ${{ inputs.max_pages           || 500 }} \
+            --max-pages-per-brand ${{ inputs.max_pages_per_brand || 30 }} \
+            --brands             "${{ inputs.brands              || '' }}" \
+            --limit               ${{ inputs.collect_limit       || 20000 }}
 
       - name: Scrape detail pages
         env:
@@ -80,7 +89,7 @@ jobs:
           GUAZI_PASSWORD: ${{ secrets.GUAZI_PASSWORD }}
         run: |
           python scrape_guazi_en.py \
-            --limit   ${{ inputs.scrape_limit || 3000 }} \
+            --limit   ${{ inputs.scrape_limit || 5000 }} \
             --workers ${{ inputs.workers      || 4 }}
 
       - name: Mirror images to Supabase Storage
