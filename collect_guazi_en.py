@@ -376,18 +376,32 @@ def build_search_url(brand: str | None, min_price: int, min_year: int,
 
 
 def discover_brands(page) -> list[str]:
-    """Visit /used-cars/ and extract brand slugs from navigation."""
-    try:
-        page.goto(f"{BASE_URL}/used-cars/", wait_until="domcontentloaded",
-                  timeout=30_000)
-        page.wait_for_timeout(2000)
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(1000)
-        brands = page.evaluate(DISCOVER_BRANDS_JS)
-        return brands or []
-    except Exception as e:
-        print(f"  brand discovery failed: {e}")
-        return []
+    """Extract brand slugs from /used-cars/ navigation.
+
+    The brand nav links are present in SSR HTML, so a single goto + evaluate
+    is enough. We retry a few times (the page occasionally times out) and try
+    both the bare and a filtered URL before giving up. Callers should fall
+    back to the built-in BRAND_SLUG_TO_NAME list if this returns few brands.
+    """
+    urls = [
+        f"{BASE_URL}/used-cars/",
+        build_search_url(None, 7000, 2021, 100000, "S,A", "", 1),
+    ]
+    for attempt in range(3):
+        url = urls[attempt % len(urls)]
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+            page.wait_for_timeout(2500)
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            page.wait_for_timeout(1000)
+            brands = page.evaluate(DISCOVER_BRANDS_JS)
+            if brands:
+                return brands
+            print(f"  discovery attempt {attempt + 1}: 0 brands from {url}")
+        except Exception as e:
+            print(f"  discovery attempt {attempt + 1} failed: {e}")
+        time.sleep(2)
+    return []
 
 
 def new_browser_ctx(pw):
@@ -502,12 +516,18 @@ def main() -> None:
     if guazi_email and guazi_password:
         login(page, guazi_email, guazi_password)
 
+    builtin = sorted(BRAND_SLUG_TO_NAME.keys())
     if args.brands.strip():
         brands = [b.strip() for b in args.brands.split(",") if b.strip()]
         print(f"  brands (manual): {len(brands)}")
     else:
-        brands = discover_brands(page)
-        print(f"  brands discovered: {len(brands)}")
+        discovered = discover_brands(page)
+        # Merge discovery with the built-in catalog so a flaky/empty discovery
+        # never aborts the run. Discovered-only slugs (new brands) are kept too.
+        merged = sorted(set(discovered) | set(builtin))
+        print(f"  brands discovered: {len(discovered)}, "
+              f"built-in: {len(builtin)}, crawling: {len(merged)}")
+        brands = merged
     if not brands:
         sys.exit("No brands to crawl — aborting")
 
