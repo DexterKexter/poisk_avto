@@ -20,7 +20,11 @@ on:
       min_year:
         description: 'Skip cars older than this year (0 = no filter)'
         required: false
-        default: '0'
+        default: '2020'
+      max_mileage_km:
+        description: 'Skip cars with more km than this (0 = no filter)'
+        required: false
+        default: '100000'
       collect_limit:
         description: 'Max new IDs to upsert in collect step'
         required: false
@@ -66,10 +70,11 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
           python collect_encar.py \
-            --pages       ${{ inputs.pages         || 10 }} \
-            --page-size   ${{ inputs.page_size     || 200 }} \
-            --min-year    ${{ inputs.min_year      || 0 }} \
-            --limit       ${{ inputs.collect_limit || 5000 }}
+            --pages          ${{ inputs.pages          || 10 }} \
+            --page-size      ${{ inputs.page_size      || 200 }} \
+            --min-year       ${{ inputs.min_year       || 2020 }} \
+            --max-mileage-km ${{ inputs.max_mileage_km || 100000 }} \
+            --limit          ${{ inputs.collect_limit  || 5000 }}
 
       - name: Scrape pending cards (batched API)
         env:
