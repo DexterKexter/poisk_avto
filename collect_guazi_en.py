@@ -352,9 +352,13 @@ def upsert_pending(card: dict) -> bool:
     return DB.upsert_pending(rec)
 
 
-def build_search_url(min_price: int, min_year: int, max_mileage: int,
-                     grades: str, seller_types: str, page: int) -> str:
-    """Build en.guazi.com search URL with server-side filters."""
+def build_search_url(brand: str | None, min_price: int, min_year: int,
+                     max_mileage: int, grades: str, seller_types: str,
+                     page: int) -> str:
+    """Build en.guazi.com search URL with server-side filters.
+
+    If brand is given, scope to /used-cars/{brand}/. Otherwise global /used-cars/.
+    """
     params = {
         "price": f"{min_price},",
         "licenseYear": f"{min_year},",
@@ -367,32 +371,27 @@ def build_search_url(min_price: int, min_year: int, max_mileage: int,
     if page > 1:
         params["page"] = str(page)
     qs = "&".join(f"{k}={v}" for k, v in params.items())
-    return f"{BASE_URL}/used-cars/?{qs}"
+    path = f"/used-cars/{brand}/" if brand else "/used-cars/"
+    return f"{BASE_URL}{path}?{qs}"
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--min-year", type=int, default=2021)
-    ap.add_argument("--max-mileage-km", type=int, default=100_000)
-    ap.add_argument("--min-price-usd", type=int, default=7_000)
-    ap.add_argument("--grades", type=str, default="S,A")
-    ap.add_argument("--seller-types", type=str, default="180003,180002",
-                    help="180003=Guazi Owned, 180002=Certified Dealer")
-    ap.add_argument("--max-pages", type=int, default=500)
-    ap.add_argument("--limit", type=int, default=20_000)
-    args = ap.parse_args()
+def discover_brands(page) -> list[str]:
+    """Visit /used-cars/ and extract brand slugs from navigation."""
+    try:
+        page.goto(f"{BASE_URL}/used-cars/", wait_until="domcontentloaded",
+                  timeout=30_000)
+        page.wait_for_timeout(2000)
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(1000)
+        brands = page.evaluate(DISCOVER_BRANDS_JS)
+        return brands or []
+    except Exception as e:
+        print(f"  brand discovery failed: {e}")
+        return []
 
-    if not DB.USE_POSTGRES:
-        sys.exit("Need Postgres")
 
-    guazi_email = os.environ.get("GUAZI_EMAIL", "")
-    guazi_password = os.environ.get("GUAZI_PASSWORD", "")
-
-    print(f"Collecting en.guazi.com (server-side filtered)")
-    print(f"  price>=${args.min_price_usd:,}, year>={args.min_year}, "
-          f"mileage<={args.max_mileage_km:,}km, grades={args.grades}")
-
-    pw = sync_playwright().start()
+def new_browser_ctx(pw):
+    """Spin up a fresh browser/context/page (used to recycle fingerprint)."""
     browser = pw.chromium.launch(
         headless=True,
         args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
@@ -405,47 +404,48 @@ def main() -> None:
         "Object.defineProperty(navigator,'webdriver',{get:()=>undefined})"
     )
     page = ctx.new_page()
+    return browser, ctx, page
 
-    if guazi_email and guazi_password:
-        login(page, guazi_email, guazi_password)
 
-    saved = 0
-    seen: set[str] = set()
-    started = time.time()
-    page_num = 1
+def crawl_brand(page, brand: str, args, seen: set[str], saved_so_far: int,
+                started: float) -> tuple[int, int]:
+    """Walk pages for one brand. Returns (saved_added, pages_walked)."""
+    import random
+    saved_added = 0
     empty_streak = 0
-
-    while page_num <= args.max_pages and saved < args.limit:
+    page_num = 1
+    pages_walked = 0
+    while (page_num <= args.max_pages_per_brand
+           and saved_so_far + saved_added < args.limit):
         url = build_search_url(
-            args.min_price_usd, args.min_year, args.max_mileage_km,
+            brand, args.min_price_usd, args.min_year, args.max_mileage_km,
             args.grades, args.seller_types, page_num)
-
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-            page.wait_for_timeout(1500)
+            page.wait_for_timeout(int(random.uniform(1200, 2500)))
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            page.wait_for_timeout(1000)
+            page.wait_for_timeout(int(random.uniform(600, 1200)))
         except Exception as e:
-            print(f"  page {page_num}: load error — {e}")
+            print(f"  [{brand}] page {page_num}: load error — {e}")
             empty_streak += 1
-            if empty_streak >= 3:
+            if empty_streak >= 2:
                 break
             page_num += 1
             continue
 
         if page_num == 1:
             total = page.evaluate(TOTAL_RESULTS_JS)
-            print(f"  {total:,} results matching filters")
+            print(f"  [{brand}] {total:,} results")
 
         cards = extract_cards_from_page(page)
         if not cards:
             empty_streak += 1
-            if empty_streak >= 3:
-                print(f"  {empty_streak} empty pages in a row — stopping")
+            if empty_streak >= 2:
                 break
             page_num += 1
             continue
         empty_streak = 0
+        pages_walked = page_num
 
         page_saved = 0
         for card in cards:
@@ -453,20 +453,97 @@ def main() -> None:
                 continue
             seen.add(card["item_id"])
             if upsert_pending(card):
-                saved += 1
+                saved_added += 1
                 page_saved += 1
 
         elapsed = int(time.time() - started)
-        print(f"  page {page_num}: {len(cards)} cards -> {page_saved} new "
-              f"(total {saved}, {elapsed}s)")
+        print(f"  [{brand}] page {page_num}: {len(cards)} cards "
+              f"-> {page_saved} new (brand total {saved_added}, "
+              f"grand total {saved_so_far + saved_added}, {elapsed}s)")
         page_num += 1
-        time.sleep(0.3)
+        time.sleep(random.uniform(1.0, 2.5))
 
-    browser.close()
-    pw.stop()
+    return saved_added, pages_walked
+
+
+def main() -> None:
+    import random
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--min-year", type=int, default=2021)
+    ap.add_argument("--max-mileage-km", type=int, default=100_000)
+    ap.add_argument("--min-price-usd", type=int, default=7_000)
+    ap.add_argument("--grades", type=str, default="S,A")
+    ap.add_argument("--seller-types", type=str, default="180003,180002",
+                    help="180003=Guazi Owned, 180002=Certified Dealer")
+    ap.add_argument("--max-pages", type=int, default=500,
+                    help="(legacy) hard cap on total pages")
+    ap.add_argument("--max-pages-per-brand", type=int, default=30,
+                    help="guazi caps pagination at ~25 pages per scope")
+    ap.add_argument("--brands", type=str, default="",
+                    help="comma-separated brand slugs (default: auto-discover)")
+    ap.add_argument("--brand-recycle-every", type=int, default=10,
+                    help="restart browser after this many brands to dodge anti-bot")
+    ap.add_argument("--limit", type=int, default=20_000)
+    args = ap.parse_args()
+
+    if not DB.USE_POSTGRES:
+        sys.exit("Need Postgres")
+
+    guazi_email = os.environ.get("GUAZI_EMAIL", "")
+    guazi_password = os.environ.get("GUAZI_PASSWORD", "")
+
+    print(f"Collecting en.guazi.com per-brand (server-side filtered)")
+    print(f"  price>=${args.min_price_usd:,}, year>={args.min_year}, "
+          f"mileage<={args.max_mileage_km:,}km, grades={args.grades}")
+
+    pw = sync_playwright().start()
+    browser, ctx, page = new_browser_ctx(pw)
+
+    if guazi_email and guazi_password:
+        login(page, guazi_email, guazi_password)
+
+    if args.brands.strip():
+        brands = [b.strip() for b in args.brands.split(",") if b.strip()]
+        print(f"  brands (manual): {len(brands)}")
+    else:
+        brands = discover_brands(page)
+        print(f"  brands discovered: {len(brands)}")
+    if not brands:
+        sys.exit("No brands to crawl — aborting")
+
+    random.shuffle(brands)
+
+    saved = 0
+    seen: set[str] = set()
+    started = time.time()
+    brands_done = 0
+    for brand in brands:
+        if saved >= args.limit:
+            print(f"  collect_limit reached ({saved}), stopping")
+            break
+
+        added, pages = crawl_brand(page, brand, args, seen, saved, started)
+        saved += added
+        brands_done += 1
+        print(f"  ==> [{brand}] +{added} new, {pages} pages "
+              f"(grand total {saved}, {brands_done}/{len(brands)} brands)")
+
+        if brands_done % args.brand_recycle_every == 0:
+            print(f"  recycling browser after {brands_done} brands...")
+            try:
+                browser.close()
+            except Exception:
+                pass
+            browser, ctx, page = new_browser_ctx(pw)
+            time.sleep(random.uniform(2.0, 4.0))
+
+    try:
+        browser.close()
+    finally:
+        pw.stop()
 
     elapsed = int(time.time() - started)
-    print(f"\nDone in {elapsed}s. Saved: {saved} from {page_num - 1} pages")
+    print(f"\nDone in {elapsed}s. Saved: {saved} from {brands_done} brands")
 
 
 if __name__ == "__main__":
