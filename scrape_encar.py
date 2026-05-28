@@ -134,11 +134,13 @@ ENCAR_BRAND_ALIASES = {
     "Citroen-DS": "Citroen",
 }
 
-# encar English model-group names → catalog model names.
+# encar English model-group names → catalog model names. Also fixes encar's
+# own typos/casing (TIBOLI → Tivoli) so the value matches the models catalog.
 ENCAR_MODEL_ALIASES = {
     "avante": "Elantra", "canival": "Carnival", "morning": "Picanto",
     "santafe": "Santa Fe", "grandeur": "Azera", "starex": "H-1",
     "mohave": "Borrego", "qm6": "Koleos",
+    "tiboli": "Tivoli", "korando": "Korando", "ray": "Ray",
 }
 
 _brand_cache: dict[str, int] = {}
