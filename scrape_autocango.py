@@ -204,7 +204,6 @@ def extract_detail_from_html(html: str) -> dict:
         "mileage":       get(r"Mlg\(km\)\s+([\d,]+)"),
         "engine_cc":     get(r"Engine\(cc\)\s+(\d+|-)"),
         "seats":         get(r"Seats\s+(\d+)"),
-        "doors":         get(r"Doors\s+(\d+)"),
         "weight_kg":     get(r"Weight\(kg\)\s+(\d+|-)"),
         "max_cap_kg":    get(r"Max\.Cap\(kg\)\s+(\d+|-)"),
         "battery_cap":   get(r"Batt\.Cap\.\(kWh\)\s+([\d.]+|-)"),
@@ -378,7 +377,6 @@ def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
     return {
         "source": SOURCE,
         "source_id": str(source_id),
-        "source_language": SOURCE_LANGUAGE,
         "url": build_detail_url(meta, source_id),
         "title": title,
 
@@ -394,7 +392,6 @@ def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
         "new_price_original": msrp_cny,
         "new_price_currency": "CNY" if msrp_cny else None,
 
-        "km_age_original": safe_int(detail.get("mileage")),
         "km_age_unit": KM_AGE_UNIT,
         "km_age": safe_int(detail.get("mileage")),
 
@@ -412,9 +409,6 @@ def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
         "displacement": displacement_l,
         "horse_power": horsepower,
 
-        "length_mm": length,
-        "width_mm": width,
-        "height_mm": height,
         "wheelbase_mm": None,
 
         "city_original": detail.get("city", "") or "",
@@ -445,7 +439,6 @@ def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
             "battery_capacity_kwh": detail.get("battery_cap"),
             "range_km": detail.get("range_km"),
             "seats": safe_int(detail.get("seats")),
-            "doors": safe_int(detail.get("doors")),
             "volume_m3": detail.get("volume_m3"),
             "weight_kg": safe_int(detail.get("weight_kg")),
             "max_cap_kg": safe_int(detail.get("max_cap_kg")),

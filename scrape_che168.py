@@ -372,7 +372,6 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
     return {
         "source": SOURCE,
         "source_id": str(sku_id),
-        "source_language": SOURCE_LANGUAGE,
         "url": detail_url,
         "title": carname,
 
@@ -388,7 +387,6 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
         "price_original": price_cny,
         "price_currency": PRICE_CURRENCY,
 
-        "km_age_original": mileage_km,
         "km_age_unit": KM_AGE_UNIT,
         "km_age": mileage_km,
 
