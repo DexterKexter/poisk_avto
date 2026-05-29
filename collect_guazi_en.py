@@ -439,19 +439,22 @@ def crawl_brand(page, brand: str, args, seen: set[str], saved_so_far: int,
             page.wait_for_timeout(int(random.uniform(1200, 2500)))
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             page.wait_for_timeout(int(random.uniform(600, 1200)))
+
+            if page_num == 1:
+                total = page.evaluate(TOTAL_RESULTS_JS)
+                print(f"  [{brand}] {total:,} results")
+
+            cards = extract_cards_from_page(page)
         except Exception as e:
-            print(f"  [{brand}] page {page_num}: load error — {e}")
+            # "Execution context was destroyed" etc — anti-bot navigation /
+            # redirect mid-evaluate. Skip this page instead of crashing the run.
+            print(f"  [{brand}] page {page_num}: load/parse error — {e}")
             empty_streak += 1
             if empty_streak >= 2:
                 break
             page_num += 1
             continue
 
-        if page_num == 1:
-            total = page.evaluate(TOTAL_RESULTS_JS)
-            print(f"  [{brand}] {total:,} results")
-
-        cards = extract_cards_from_page(page)
         if not cards:
             empty_streak += 1
             if empty_streak >= 2:
@@ -542,7 +545,18 @@ def main() -> None:
             print(f"  collect_limit reached ({saved}), stopping")
             break
 
-        added, pages = crawl_brand(page, brand, args, seen, saved, started)
+        try:
+            added, pages = crawl_brand(page, brand, args, seen, saved, started)
+        except Exception as e:
+            # A crashed page/context shouldn't abort the whole run — recycle
+            # the browser and move to the next brand.
+            print(f"  ==> [{brand}] crawl error — {e}; recycling browser")
+            try:
+                browser.close()
+            except Exception:
+                pass
+            browser, ctx, page = new_browser_ctx(pw)
+            continue
         saved += added
         brands_done += 1
         print(f"  ==> [{brand}] +{added} new, {pages} pages "
