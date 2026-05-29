@@ -28,6 +28,7 @@ from typing import Any
 import requests
 
 import db as DB
+from model_split import split_family_model
 
 SOURCE = "encar"
 
@@ -297,6 +298,11 @@ def parse_car(api_car: dict) -> dict | None:
 
         ts = DB.now_iso()
 
+        # Family/model split (BMW 5 Series → 530i, Mercedes C-Class → C260)
+        _model_in = model_clean or model_group_en or category.get("modelName", "")
+        _family, _model_out, _comp_out = split_family_model(
+            mark_en, _model_in, complectation_str)
+
         return {
             "source": SOURCE,
             "source_id": source_id,
@@ -308,9 +314,9 @@ def parse_car(api_car: dict) -> dict | None:
             "mark": mark_en,
             "brand_id": brand_id,
             "model_id": model_id,
-            "series_original": model_group_en or category.get("modelName", ""),
-            "model": model_clean or model_group_en or category.get("modelName", ""),
-            "complectation": complectation_str,
+            "series_original": _family or model_group_en or category.get("modelName", ""),
+            "model": _model_out,
+            "complectation": _comp_out,
             "year": year,
 
             "price_original": price,

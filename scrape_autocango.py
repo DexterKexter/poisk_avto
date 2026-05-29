@@ -21,6 +21,7 @@ import traceback
 from typing import Any
 
 import db as DB
+from model_split import split_family_model
 import stealth
 
 SOURCE = "autocango"
@@ -375,6 +376,8 @@ def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
     price_usd = detail.get("export_usd") or meta.get("price_usd")
     msrp_cny = detail.get("msrp_cny")
 
+    _family, _model_out, _ = split_family_model(brand, series, "")
+
     return {
         "source": SOURCE,
         "source_id": str(source_id),
@@ -384,8 +387,8 @@ def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
 
         "mark_original": brand,
         "mark": brand,
-        "series_original": series,
-        "model": f"{series}".strip(),
+        "series_original": _family or series,
+        "model": _model_out,
         "complectation": "",
         "year": year,
 

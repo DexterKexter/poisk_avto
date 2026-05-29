@@ -22,6 +22,7 @@ from typing import Any
 from playwright.sync_api import sync_playwright
 
 import db as DB
+from model_split import split_family_model
 
 sys.stdout.reconfigure(line_buffering=True)
 
@@ -369,6 +370,12 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
     source_data = {k: v for k, v in source_data.items() if v is not None}
 
     ts = DB.now_iso()
+
+    # Family/model split for BMW (5 Series), Mercedes (C-Class), etc.
+    complectation_str = " ".join(carname.split(" ")[1:]) if " " in carname else ""
+    family, model_final, complectation_str = split_family_model(
+        mark_en, series_en or carname, complectation_str)
+
     return {
         "source": SOURCE,
         "source_id": str(sku_id),
@@ -378,10 +385,10 @@ def parse_card(html: str, meta: dict, sku_id: str) -> dict | None:
 
         "mark_original": brand_zh or None,
         "mark": mark_en or None,
-        "series_original": series_zh or None,
+        "series_original": family or series_zh or None,
         # Model is bare series (without brand) — frontend renders mark separately
-        "model": series_en or carname,
-        "complectation": " ".join(carname.split(" ")[1:]) if " " in carname else None,
+        "model": model_final,
+        "complectation": complectation_str or None,
         "year": year,
         "reg_date": reg_iso,
 

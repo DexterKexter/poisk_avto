@@ -460,32 +460,7 @@ def extract_brand_series(title: str, slug_brand_series: str) -> tuple[str, str, 
 
 
 # Family patterns: BMW "5 Series", Mercedes "C-Class", etc.
-FAMILY_RE = re.compile(r'^(\d+\s+Series.*|[A-Z]{1,3}-Class|[A-Z]{1,3}\s+Class)$',
-                       re.IGNORECASE)
-
-# Specific model patterns within family
-BMW_MODEL_RE = re.compile(r'\b(M[2-8]\d{0,2}[A-Za-z]*|[1-8]\d{2}[A-Za-z]*)\b')
-MB_MODEL_RE = re.compile(r'\b([A-Z]{1,4})\s?(\d{2,3}[A-Za-z]*)\b')
-
-
-def split_family_model(brand: str, model: str, complectation: str) -> tuple[str | None, str, str]:
-    """If model looks like a family (5 Series, C-Class), extract specific
-    submodel from complectation. Returns (family, model, complectation)."""
-    if not model or not FAMILY_RE.match(model):
-        return None, model, complectation
-
-    family = model
-    new_model = model  # fallback
-    if brand == "BMW":
-        m = BMW_MODEL_RE.search(complectation or "")
-        if m:
-            new_model = m.group(1)
-    elif brand == "Mercedes-Benz":
-        m = MB_MODEL_RE.search(complectation or "")
-        if m:
-            new_model = m.group(1) + m.group(2)
-
-    return family, new_model, complectation
+from model_split import split_family_model
 
 
 def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
