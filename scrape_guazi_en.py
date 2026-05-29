@@ -459,6 +459,35 @@ def extract_brand_series(title: str, slug_brand_series: str) -> tuple[str, str, 
     return brand, series, complectation
 
 
+# Family patterns: BMW "5 Series", Mercedes "C-Class", etc.
+FAMILY_RE = re.compile(r'^(\d+\s+Series.*|[A-Z]{1,3}-Class|[A-Z]{1,3}\s+Class)$',
+                       re.IGNORECASE)
+
+# Specific model patterns within family
+BMW_MODEL_RE = re.compile(r'\b(M[2-8]\d{0,2}[A-Za-z]*|[1-8]\d{2}[A-Za-z]*)\b')
+MB_MODEL_RE = re.compile(r'\b([A-Z]{1,4})\s?(\d{2,3}[A-Za-z]*)\b')
+
+
+def split_family_model(brand: str, model: str, complectation: str) -> tuple[str | None, str, str]:
+    """If model looks like a family (5 Series, C-Class), extract specific
+    submodel from complectation. Returns (family, model, complectation)."""
+    if not model or not FAMILY_RE.match(model):
+        return None, model, complectation
+
+    family = model
+    new_model = model  # fallback
+    if brand == "BMW":
+        m = BMW_MODEL_RE.search(complectation or "")
+        if m:
+            new_model = m.group(1)
+    elif brand == "Mercedes-Benz":
+        m = MB_MODEL_RE.search(complectation or "")
+        if m:
+            new_model = m.group(1) + m.group(2)
+
+    return family, new_model, complectation
+
+
 def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
     slug = meta.get("slug", "")
     parsed = parse_slug(slug) if slug else None
@@ -496,9 +525,12 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
     slug_brand_series = parsed["brand_series_slug"] if parsed else ""
     brand, series, complectation = extract_brand_series(title, slug_brand_series)
 
-    # Match to brands/models catalog
+    # Split family / model for brands with families (BMW 5 Series, Mercedes C-Class)
+    family, series, complectation = split_family_model(brand, series, complectation)
+
+    # Match to brands/models catalog (try family first, then specific model)
     brand_id = lookup_brand_id(brand)
-    model_id = lookup_model_id(brand_id, series)
+    model_id = lookup_model_id(brand_id, family) or lookup_model_id(brand_id, series)
 
     # Year + manufacturing date
     mfg_raw = specs.get("mfg_date", "")
@@ -679,6 +711,7 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
         "mark": brand or None,
         "series_original": None,
         "model": series or None,
+        "family": family or None,
         "complectation": complectation or None,
         "year": year,
         "reg_date": reg_date,
