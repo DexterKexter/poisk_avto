@@ -1,0 +1,51 @@
+name: LLM normalize (manual)
+
+# Manual only — match scraped cars to our brands/models catalog via the
+# deterministic resolver + qwen LLM fallback. No schedule on purpose; run by
+# hand from the Actions tab until the matching is trusted.
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Max unique (mark,model) spellings to process'
+        required: false
+        default: '10'
+      model:
+        description: 'OpenRouter model'
+        required: false
+        default: 'qwen/qwen3.6-flash'
+      dry_run:
+        description: 'Dry run (no DB writes)'
+        required: false
+        default: 'true'
+      no_llm:
+        description: 'Deterministic only, skip LLM'
+        required: false
+        default: 'false'
+
+concurrency:
+  group: llm-normalize
+  cancel-in-progress: false
+
+jobs:
+  normalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install deps
+        run: pip install -r requirements.txt
+      - name: Normalize
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          python llm_normalize.py \
+            --limit ${{ inputs.limit || 10 }} \
+            --model "${{ inputs.model || 'qwen/qwen3.6-flash' }}" \
+            ${{ (inputs.dry_run  != 'false') && '--dry-run' || '' }} \
+            ${{ (inputs.no_llm   == 'true')  && '--no-llm'  || '' }}
