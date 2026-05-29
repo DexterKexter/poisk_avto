@@ -388,9 +388,7 @@ SPEC_LINE_MAP = {
     "Valve Train": "valve_train",
     "Horsepower (ps)": "horsepower", "Horsepower": "horsepower",
     "Max Power": "max_power_kw",
-    "Max Power Speed": "power_rpm",
     "Max Torque": "torque", "Torque": "torque",
-    "Max Torque Speed": "torque_rpm",
     "Transmission": "transmission",
     "Drive Train": "drive_type", "Drive Type": "drive_type",
     "Fuel Type": "fuel_type",
@@ -401,8 +399,6 @@ SPEC_LINE_MAP = {
     "Battery Capacity (kWh)": "battery_capacity",
     "Battery Capacity": "battery_capacity",
     "EV Range (km)": "ev_range", "EV Range": "ev_range",
-    "Energy Consumption": "energy_consumption",
-    "Fuel Consumption": "fuel_consumption",
     "Total Motor Power": "total_motor_power",
     "Total Motor Torque": "total_motor_torque",
     "Front Motor Power": "front_motor_power",
@@ -459,10 +455,6 @@ def extract_brand_series(title: str, slug_brand_series: str) -> tuple[str, str, 
     return brand, series, complectation
 
 
-# Family patterns: BMW "5 Series", Mercedes "C-Class", etc.
-from model_split import split_family_model
-
-
 def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
     slug = meta.get("slug", "")
     parsed = parse_slug(slug) if slug else None
@@ -500,12 +492,9 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
     slug_brand_series = parsed["brand_series_slug"] if parsed else ""
     brand, series, complectation = extract_brand_series(title, slug_brand_series)
 
-    # Split family / model for brands with families (BMW 5 Series, Mercedes C-Class)
-    family, series, complectation = split_family_model(brand, series, complectation)
-
-    # Match to brands/models catalog (try family first, then specific model)
+    # Match to brands/models catalog
     brand_id = lookup_brand_id(brand)
-    model_id = lookup_model_id(brand_id, family) or lookup_model_id(brand_id, series)
+    model_id = lookup_model_id(brand_id, series)
 
     # Year + manufacturing date
     mfg_raw = specs.get("mfg_date", "")
@@ -636,25 +625,9 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
     # EV / battery — parse numeric values for dedicated columns
     battery_kwh = parse_float(specs.get("battery_capacity"))
     ev_range_km = parse_int(specs.get("ev_range"))
-    energy_cons = parse_float(specs.get("energy_consumption"))
-    total_motor_kw = parse_float(specs.get("total_motor_power"))
-    total_motor_torque = parse_float(specs.get("total_motor_torque"))
-    front_motor_kw = parse_float(specs.get("front_motor_power"))
-    front_motor_torque = parse_float(specs.get("front_motor_torque"))
-    rear_motor_kw = parse_float(specs.get("rear_motor_power"))
-    rear_motor_torque = parse_float(specs.get("rear_motor_torque"))
 
     # Engine power in kW (ICE or single-motor EV)
     engine_kw = parse_float(specs.get("max_power_kw"))
-    # motor_power_kw = total motor power for multi-motor EV, else engine kW
-    motor_kw = total_motor_kw or (engine_kw if engine_type == "Electric" else None)
-    engine_power_kw = engine_kw if engine_type != "Electric" else None
-
-    # Torque
-    torque = parse_float(specs.get("torque"))
-
-    # Fuel consumption (ICE)
-    fuel_cons = parse_float(specs.get("fuel_consumption"))
 
     # Inspection score — sum all inspection sub-scores
     insp_vals = [v for k, v in inspection.items()
@@ -684,7 +657,7 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
         "model_id": model_id,
         "mark_original": None,
         "mark": brand or None,
-        "series_original": family or None,
+        "series_original": None,
         "model": series or None,
         "complectation": complectation or None,
         "year": year,
@@ -711,28 +684,14 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
 
         # Engine details (new columns)
         "engine_model": specs.get("engine_model") or None,
-        "engine_power_kw": engine_power_kw,
         "num_cylinders": parse_int(specs.get("num_cylinders")),
         "cylinder_arrangement": specs.get("cylinder_arrangement") or None,
         "valves_per_cylinder": parse_int(specs.get("valves_per_cylinder")),
         "valve_train": specs.get("valve_train") or None,
-        "torque_nm": torque,
-        "power_rpm": specs.get("power_rpm") or None,
-        "torque_rpm": specs.get("torque_rpm") or None,
-        "fuel_consumption": fuel_cons,
 
         # EV / battery (new + existing columns)
         "battery_kwh": battery_kwh,
         "ev_range_km": ev_range_km,
-        "energy_consumption": energy_cons,
-        "motor_power_kw": motor_kw,
-        "total_motor_torque_nm": total_motor_torque,
-        "front_motor_power_kw": front_motor_kw,
-        "front_motor_torque_nm": front_motor_torque,
-        "rear_motor_power_kw": rear_motor_kw,
-        "rear_motor_torque_nm": rear_motor_torque,
-        "charge_time_fast": specs.get("fast_charge_time") or None,
-        "charge_time_slow": specs.get("slow_charge_time") or None,
 
         # Body / dimensions
         "length_mm": length_mm,

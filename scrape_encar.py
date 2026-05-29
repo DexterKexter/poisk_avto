@@ -28,7 +28,6 @@ from typing import Any
 import requests
 
 import db as DB
-from model_split import split_family_model
 
 SOURCE = "encar"
 
@@ -298,11 +297,6 @@ def parse_car(api_car: dict) -> dict | None:
 
         ts = DB.now_iso()
 
-        # Family/model split (BMW 5 Series → 530i, Mercedes C-Class → C260)
-        _model_in = model_clean or model_group_en or category.get("modelName", "")
-        _family, _model_out, _comp_out = split_family_model(
-            mark_en, _model_in, complectation_str)
-
         return {
             "source": SOURCE,
             "source_id": source_id,
@@ -314,9 +308,9 @@ def parse_car(api_car: dict) -> dict | None:
             "mark": mark_en,
             "brand_id": brand_id,
             "model_id": model_id,
-            "series_original": _family or model_group_en or category.get("modelName", ""),
-            "model": _model_out,
-            "complectation": _comp_out,
+            "series_original": model_group_en or category.get("modelName", ""),
+            "model": model_clean or model_group_en or category.get("modelName", ""),
+            "complectation": complectation_str,
             "year": year,
 
             "price_original": price,
@@ -342,20 +336,14 @@ def parse_car(api_car: dict) -> dict | None:
             "displacement": (spec["displacement"] / 1000
                              if spec.get("displacement") else None),
             "horse_power": None,
-            "acceleration_time": "",
 
             "length_mm": None, "width_mm": None,
             "height_mm": None, "wheelbase_mm": None,
 
             "city_original": region_kr,
             "city": tr(region_kr, REGION_MAP),
-            "reg_city_original": "",
-            "reg_city": "",
             "reg_date": _format_reg_date(year_month),
 
-            "owners_count": None,
-            "maintenance": "",
-            "interior_color_original": "",
             "description": contents.get("text", "") or "",
 
             "images": image_urls,
@@ -367,11 +355,8 @@ def parse_car(api_car: dict) -> dict | None:
             "shop_short_name": dealer.get("name", "") or "",
             "shop_address": address,
             "shop_id": contact.get("userId", "") or "",
-            "shop_cars_count": None,
-            "sales_range": "",
 
             "vin": api_car.get("vin"),
-            "spu_id": "",
 
             "published_at": manage.get("firstAdvertisedDateTime"),
             "listing_updated_at": manage.get("modifyDateTime"),

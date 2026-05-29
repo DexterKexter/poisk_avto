@@ -21,7 +21,6 @@ import traceback
 from typing import Any
 
 import db as DB
-from model_split import split_family_model
 import stealth
 
 SOURCE = "autocango"
@@ -376,8 +375,6 @@ def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
     price_usd = detail.get("export_usd") or meta.get("price_usd")
     msrp_cny = detail.get("msrp_cny")
 
-    _family, _model_out, _ = split_family_model(brand, series, "")
-
     return {
         "source": SOURCE,
         "source_id": str(source_id),
@@ -387,8 +384,8 @@ def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
 
         "mark_original": brand,
         "mark": brand,
-        "series_original": _family or series,
-        "model": _model_out,
+        "series_original": series,
+        "model": f"{series}".strip(),
         "complectation": "",
         "year": year,
 
@@ -414,7 +411,6 @@ def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
 
         "displacement": displacement_l,
         "horse_power": horsepower,
-        "acceleration_time": "",
 
         "length_mm": length,
         "width_mm": width,
@@ -423,13 +419,8 @@ def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
 
         "city_original": detail.get("city", "") or "",
         "city": detail.get("city", "") or "",
-        "reg_city_original": "",
-        "reg_city": "",
         "reg_date": reg_date,
 
-        "owners_count": None,
-        "maintenance": "",
-        "interior_color_original": "",
         "description": detail.get("description", "") or "",
 
         "images": detail.get("images", []),
@@ -440,11 +431,8 @@ def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
         "shop_short_name": "",
         "shop_address": "",
         "shop_id": "",
-        "shop_cars_count": None,
-        "sales_range": "Export",
 
         "vin": None,  # autocango doesn't expose VIN on listing
-        "spu_id": "",
 
         "published_at": None,  # not exposed
         "listing_updated_at": None,
@@ -456,7 +444,6 @@ def parse_detail_to_car(source_id: str, detail: dict, meta: dict) -> dict:
             "engine_cc": safe_int(detail.get("engine_cc")),
             "battery_capacity_kwh": detail.get("battery_cap"),
             "range_km": detail.get("range_km"),
-            "motor_power_kw": detail.get("motor_power"),
             "seats": safe_int(detail.get("seats")),
             "doors": safe_int(detail.get("doors")),
             "volume_m3": detail.get("volume_m3"),
