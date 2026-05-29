@@ -380,22 +380,18 @@ SPEC_LINE_MAP = {
     "Mfg. Year": "mfg_date", "Mfg Date": "mfg_date",
     "1st Reg. Year": "reg_date", "1st Registration": "reg_date",
     "Mileage": "mileage", "Body Style": "body_style",
-    "Exterior Color": "color", "Seats": "seats", "Doors": "doors",
-    "Engine": "engine_model", "Displacement": "displacement",
-    "Cylinder Arrangement": "cylinder_arrangement",
-    "Number of Cylinders": "num_cylinders",
-    "Valves per Cylinder": "valves_per_cylinder",
-    "Valve Train": "valve_train",
+    "Exterior Color": "color", "Seats": "seats",
+    "Displacement": "displacement",
     "Horsepower (ps)": "horsepower", "Horsepower": "horsepower",
     "Max Power": "max_power_kw",
     "Max Torque": "torque", "Torque": "torque",
     "Transmission": "transmission",
     "Drive Train": "drive_type", "Drive Type": "drive_type",
     "Fuel Type": "fuel_type",
-    "Dimension (mm)": "dimensions", "Curb Weight (kg)": "curb_weight",
-    "Curb Weight": "curb_weight", "Steering": "steering",
+    "Dimension (mm)": "dimensions",
+    "Steering": "steering",
     "Current Location": "location", "Location": "location",
-    "Seller Type": "seller_type", "Port": "port",
+    "Seller Type": "seller_type",
     "Battery Capacity (kWh)": "battery_capacity",
     "Battery Capacity": "battery_capacity",
     "EV Range (km)": "ev_range", "EV Range": "ev_range",
@@ -649,7 +645,6 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
         "source": SOURCE,
         "country": "China",
         "source_id": item_id,
-        "source_language": SOURCE_LANGUAGE,
         "url": detail_url,
         "title": title,
 
@@ -666,7 +661,6 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
         "price_original": price_usd,
         "price_currency": PRICE_CURRENCY,
 
-        "km_age_original": mileage_km,
         "km_age_unit": KM_AGE_UNIT,
         "km_age": mileage_km,
 
@@ -683,28 +677,17 @@ def build_record(detail: dict, meta: dict, item_id: str) -> dict | None:
         "horse_power": hp,
 
         # Engine details (new columns)
-        "engine_model": specs.get("engine_model") or None,
-        "num_cylinders": parse_int(specs.get("num_cylinders")),
-        "cylinder_arrangement": specs.get("cylinder_arrangement") or None,
-        "valves_per_cylinder": parse_int(specs.get("valves_per_cylinder")),
-        "valve_train": specs.get("valve_train") or None,
 
         # EV / battery (new + existing columns)
         "battery_kwh": battery_kwh,
         "ev_range_km": ev_range_km,
 
         # Body / dimensions
-        "length_mm": length_mm,
-        "width_mm": width_mm,
-        "height_mm": height_mm,
-        "curb_weight_kg": curb_weight,
-        "doors": parse_int(specs.get("doors")),
         "seats": parsed["seats"] if parsed else None,
 
         # Location / logistics
         "city_original": None,
         "city": city or None,
-        "port": specs.get("port") or None,
         "steering": specs.get("steering") or None,
 
         # Condition / inspection

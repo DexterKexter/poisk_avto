@@ -300,7 +300,6 @@ def parse_car(api_car: dict) -> dict | None:
         return {
             "source": SOURCE,
             "source_id": source_id,
-            "source_language": SOURCE_LANGUAGE,
             "url": CARD_URL_TPL.format(id=source_id),
             "title": " ".join(x for x in (mark_en, model_clean, complectation_str) if x).strip(),
 
@@ -318,7 +317,6 @@ def parse_car(api_car: dict) -> dict | None:
             "new_price_original": new_price,
             "new_price_currency": PRICE_CURRENCY if new_price else None,
 
-            "km_age_original": mileage,
             "km_age_unit": KM_AGE_UNIT,
             "km_age": mileage,
 
@@ -337,8 +335,6 @@ def parse_car(api_car: dict) -> dict | None:
                              if spec.get("displacement") else None),
             "horse_power": None,
 
-            "length_mm": None, "width_mm": None,
-            "height_mm": None, "wheelbase_mm": None,
 
             "city_original": region_kr,
             "city": tr(region_kr, REGION_MAP),
