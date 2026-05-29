@@ -1,10 +1,10 @@
 name: Scrape che168
 
 on:
-  schedule:
-    # Every 4 hours at :15 (offset from encar :00 to spread CI load).
-    # Detail-scrape can hit 60-90 min, so 4h cadence leaves a safe gap.
-    - cron: '15 */4 * * *'
+  # Cron paused — che168 detail scraping is too slow/lossy from CI IPs without
+  # a proxy. Re-enable by uncommenting. Manual dispatch still works.
+  # schedule:
+  #   - cron: '15 */4 * * *'
   workflow_dispatch:
     inputs:
       cities:
